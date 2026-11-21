@@ -387,8 +387,9 @@ GPU-hours. To run it continuously:
 
 ## Where I used AI, and where I didn't
 
-Claude (via Claude Code) was used heavily and is credited as co-author on the
-commits.
+Claude (via Claude Code) was used heavily throughout. The split below is
+specific rather than a blanket disclaimer, because which parts were generated
+turned out to matter for how the work had to be checked.
 
 **AI did most of the typing**: boilerplate across the four system backends,
 the parquet/shard plumbing, dataframe wrangling, docstrings, and the first
