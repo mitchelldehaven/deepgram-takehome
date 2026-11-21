@@ -1,0 +1,68 @@
+# Open ASR Leaderboard, English short-form track.
+leaderboard:
+  version_id: "20-11-2026"      # pinned; the board is re-run every few days
+  rtfx_column: "RTFx ⬆️️"
+  published_columns:
+    - AMI-Cleaned
+    - Earnings22-Cleaned-AA-chunked
+    - Gigaspeech-Cleaned
+    - SPGISpeech
+    - URGENT24
+    - Voice Arena Monsoon
+    - Voxpopuli-AA-Cleaned
+
+# Three datasets spanning the difficulty range of the board: AMI sits at the
+# hard end (far-field, spontaneous, overlapping), SPGISpeech at the easy end
+# (close-mic, oratory), GigaSpeech in between. Keeping the range wide is what
+# makes the metadata breakdown in src/eval/breakdown.py informative.
+subset:
+  dataset_path: hf-audio/open-asr-leaderboard
+  split: test
+  datasets:
+    - name: AMI-Cleaned
+      config: ami_cleaned
+    - name: Gigaspeech-Cleaned
+      config: gigaspeech_cleaned
+    - name: SPGISpeech
+      config: spgispeech
+  utterances_per_dataset: 400
+  row_groups_per_dataset: 40   # evenly spaced across the length-sorted order
+  seed: 42
+
+systems:
+  - name: whisper_large_v3
+    backend: whisper
+    model: openai/whisper-large-v3
+    leaderboard_id: openai/whisper-large-v3
+    batch_size: 32
+  - name: qwen3_asr_1_7b
+    backend: qwen3_asr
+    model: Qwen/Qwen3-ASR-1.7B-hf
+    leaderboard_id: Qwen/Qwen3-ASR-1.7B-hf
+    batch_size: 16
+  - name: parakeet_tdt_0_6b_v2
+    backend: parakeet
+    model: nvidia/parakeet-tdt-0.6b-v2
+    leaderboard_id: nvidia/parakeet-tdt-0.6b-v2
+    batch_size: 16
+    venv: .venv-nemo            # NeMo is installed separately; see README
+  # Not ranked on this leaderboard. Included because the whole point of the
+  # exercise is what a published number hides, and a system the board never
+  # scored is the cleanest way to show the pipeline is doing the work.
+  - name: deepgram_nova_3
+    backend: deepgram
+    model: nova-3
+    leaderboard_id: null
+    smart_format: false
+    punctuate: false
+    numerals: false
+    concurrency: 8
+
+normalization:
+  - leaderboard
+  - custom
+
+scoring:
+  bootstrap_samples: 2000
+  confidence: 0.95
+  seed: 42

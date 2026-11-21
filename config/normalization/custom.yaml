@@ -1,0 +1,16 @@
+# Each flag is one deliberate disagreement with the leaderboard's
+# EnglishTextNormalizer. Values here are our defaults; src/eval/score.py
+# ablates them one at a time to attribute the WER delta to each rule.
+#
+# leaderboard behaviour, for reference:
+#   removes fillers, expands contractions, maps British -> American spelling,
+#   converts number words to digits, strips apostrophes.
+
+strip_non_speech: true        # same as leaderboard: drop [laughter], (inaudible)
+remove_fillers: false         # DIFFERS: leaderboard deletes um/uh, we score them
+expand_contractions: false    # DIFFERS: leaderboard splits "don't" -> "do not"
+keep_apostrophes: true        # DIFFERS: leaderboard strips them ("don t")
+british_to_american: false    # DIFFERS: leaderboard maps colour -> color
+spell_out_numbers: true       # DIFFERS: leaderboard canonicalises to digits
+normalize_currency: true      # "$5" -> "5 dollars" before spelling out
+collapse_hyphenation: true    # "re-run" -> "rerun"
