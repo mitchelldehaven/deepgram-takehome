@@ -60,8 +60,11 @@ def error_breakdown(references, hypotheses):
     return {"sub": subs / length, "del": dels / length, "ins": ins / length}
 
 
-def keyword_error_rate(references, hypotheses, keywords):
+def keyword_error_rate(references, hypotheses, keyword_sets):
     """Recall-oriented error rate over a set of content words (our added metric).
+
+    `keyword_sets` is one set of keywords per utterance, scored against that
+    utterance only.
 
     WER weights "the" and a company name identically. A contact-centre or
     meeting-notes buyer does not: missing the entity is the failure that costs
@@ -72,18 +75,44 @@ def keyword_error_rate(references, hypotheses, keywords):
     alignment-based version would inherit WER's sensitivity to the surrounding
     text, which is exactly what we are trying to factor out.
     """
+    from collections import Counter
+
     missed = total = 0
-    for ref, hyp in zip(references, hypotheses):
-        ref_tokens = str(ref).split()
-        hyp_tokens = str(hyp).split()
-        for kw in keywords:
-            ref_n = ref_tokens.count(kw)
+    for ref, hyp, keywords in zip(references, hypotheses, keyword_sets):
+        if not keywords:
+            continue
+        ref_counts = Counter(str(ref).split())
+        hyp_counts = Counter(str(hyp).split())
+        for keyword in keywords:
+            ref_n = ref_counts[keyword]
             if not ref_n:
                 continue
-            hyp_n = hyp_tokens.count(kw)
             total += ref_n
-            missed += max(0, ref_n - hyp_n)
+            missed += max(0, ref_n - hyp_counts[keyword])
     return missed / total if total else float("nan")
+
+
+def keyword_counts(references, hypotheses, keyword_sets):
+    """Per-utterance (missed, total) keyword occurrences, so the keyword error
+    rate can be bootstrapped on the same footing as WER."""
+    from collections import Counter
+
+    out = []
+    for ref, hyp, keywords in zip(references, hypotheses, keyword_sets):
+        if not keywords:
+            out.append((0, 0))
+            continue
+        ref_counts = Counter(str(ref).split())
+        hyp_counts = Counter(str(hyp).split())
+        missed = total = 0
+        for keyword in keywords:
+            ref_n = ref_counts[keyword]
+            if not ref_n:
+                continue
+            total += ref_n
+            missed += max(0, ref_n - hyp_counts[keyword])
+        out.append((missed, total))
+    return np.array(out, dtype=np.int64)
 
 
 def bootstrap_ci(pairs, samples, confidence, seed):

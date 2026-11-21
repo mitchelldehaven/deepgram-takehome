@@ -26,7 +26,7 @@ subset:
     - name: SPGISpeech
       config: spgispeech
   utterances_per_dataset: 400
-  row_groups_per_dataset: 40   # evenly spaced across the length-sorted order
+  shards_per_dataset: 8        # evenly spaced across the length-sorted order
   seed: 42
 
 systems:
@@ -46,16 +46,29 @@ systems:
     leaderboard_id: nvidia/parakeet-tdt-0.6b-v2
     batch_size: 16
     venv: .venv-nemo            # NeMo is installed separately; see README
-  # Not ranked on this leaderboard. Included because the whole point of the
-  # exercise is what a published number hides, and a system the board never
-  # scored is the cleanest way to show the pipeline is doing the work.
-  - name: deepgram_nova_3
+  # Not ranked on this leaderboard -- Deepgram has never appeared on it, in
+  # any version back to 20-05-2026, while 22 competitor APIs have submitted
+  # provider integrations. Running Nova-3 through the identical pipeline is
+  # the only way to get a number comparable to the published ones.
+  - name: deepgram_nova_3_raw
     backend: deepgram
     model: nova-3
     leaderboard_id: null
     smart_format: false
     punctuate: false
     numerals: false
+    concurrency: 8
+  # The same model with the API's default formatting on. The open models the
+  # board ranks emit bare lowercase text, and its normalizer grew up around
+  # that convention; this pair measures how much apparent WER is output
+  # formatting rather than recognition.
+  - name: deepgram_nova_3_formatted
+    backend: deepgram
+    model: nova-3
+    leaderboard_id: null
+    smart_format: true
+    punctuate: true
+    numerals: true
     concurrency: 8
 
 normalization:
@@ -66,3 +79,5 @@ scoring:
   bootstrap_samples: 2000
   confidence: 0.95
   seed: 42
+  keyword_max_df: 3        # a word in <=3 of the 1200 references counts as rare
+  keyword_min_length: 4

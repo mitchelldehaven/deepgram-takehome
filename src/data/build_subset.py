@@ -2,21 +2,24 @@
 
 Sampling design
 ---------------
-The upstream repo sorts every split by audio length, globally and descending.
-That makes naive shortcuts actively wrong: reading the first shard, or the
-first N rows, gives only the longest utterances, and duration correlates with
-WER. It also makes a cheap sample possible. Because the frame is sorted on a
-variable we care about, a *systematic* sample over it -- take row groups at
-even intervals across the whole sorted order, then sample rows inside each --
-spans the duration distribution by construction, and is at least as efficient
-as simple random sampling on that variable.
+The upstream repo sorts every split by audio length, globally and descending,
+and splits it into shards in that order. That makes the obvious shortcuts
+wrong -- the first shard, or the first N rows, is all long utterances, and
+duration correlates with WER -- but it also makes a cheap sample possible.
 
-It is also the only affordable option: the three splits are ~17 GB, and
-fetching row groups at intervals touches a few hundred MB instead.
+So: pick shards at even intervals across the sorted order, then sample rows
+uniformly at random inside each. Because the frame is ordered on a variable we
+care about, this systematic design spans the duration distribution by
+construction rather than by luck, and on that variable it is no worse than
+simple random sampling over the whole split.
 
-Size is set in config and checked after the fact, not asserted here: see the
-bootstrap CIs in src/eval/score.py, which are what actually establish whether
-400 utterances resolve the gaps between these systems.
+The alternative, fetching individual row groups over HTTP range requests,
+turned out to be ~8x slower per byte than pulling whole shards, so we pull
+whole shards and sample inside them.
+
+Whether 400 utterances per dataset is *enough* is not asserted here. It is
+answered after the fact by the bootstrap CIs in src/eval/score.py, which show
+directly which system gaps this sample can and cannot resolve.
 """
 import io
 
@@ -24,7 +27,7 @@ import dirtygit
 import numpy as np
 import pyarrow.parquet as pq
 import soundfile as sf
-from huggingface_hub import HfFileSystem
+from huggingface_hub import hf_hub_download, list_repo_files
 from loguru import logger
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -39,60 +42,51 @@ DEFAULT_CONFIG = CONFIG_DIR / "eval" / "openasr.yaml"
 COLUMNS = ["audio", "text", "id", "audio_length_s"]
 
 
-def list_row_groups(fs, repo, config, split):
-    """Footer-only pass: the ordered list of (path, row_group, n_rows)."""
-    paths = sorted(fs.glob(f"datasets/{repo}/{config}/{split}-*.parquet"))
-    if not paths:
+def list_shards(repo, config, split):
+    files = list_repo_files(repo, repo_type="dataset")
+    shards = sorted(f for f in files if f.startswith(f"{config}/{split}-"))
+    if not shards:
         raise FileNotFoundError(f"No {split} parquet for {config} in {repo}")
-    groups = []
-    for path in tqdm(paths, desc=f"{config}: footers"):
-        with fs.open(path, "rb") as handle:
-            metadata = pq.ParquetFile(handle).metadata
-            for index in range(metadata.num_row_groups):
-                groups.append((path, index, metadata.row_group(index).num_rows))
-    return groups
+    return shards
 
 
-def select_row_groups(groups, n_groups):
-    """Evenly spaced positions across the length-sorted order."""
-    if n_groups >= len(groups):
-        return list(range(len(groups)))
-    positions = np.linspace(0, len(groups) - 1, n_groups)
+def select_evenly(items, k):
+    """k positions spread across the whole ordered list, endpoints included."""
+    if k >= len(items):
+        return list(range(len(items)))
+    positions = np.linspace(0, len(items) - 1, k)
     return sorted({int(round(p)) for p in positions})
 
 
-def sample_dataset(fs, repo, dataset, split, n_utterances, n_groups, rng):
-    groups = list_row_groups(fs, repo, dataset.config, split)
-    total_rows = sum(rows for _, _, rows in groups)
-    chosen = select_row_groups(groups, n_groups)
-    per_group = int(np.ceil(n_utterances / len(chosen)))
+def sample_dataset(repo, dataset, split, n_utterances, n_shards, rng):
+    shards = list_shards(repo, dataset.config, split)
+    chosen = select_evenly(shards, n_shards)
+    per_shard = int(np.ceil(n_utterances / len(chosen)))
     logger.info(
-        f"{dataset.name}: {total_rows} utterances in {len(groups)} row groups; "
-        f"reading {len(chosen)} of them, up to {per_group} rows each"
+        f"{dataset.name}: {len(shards)} shards, reading {len(chosen)} of them "
+        f"({[c for c in chosen]}), up to {per_shard} rows each"
     )
 
     records = []
-    for position in tqdm(chosen, desc=f"{dataset.name}: rows"):
-        path, group_index, n_rows = groups[position]
-        with fs.open(path, "rb") as handle:
-            table = pq.ParquetFile(handle).read_row_group(group_index, columns=COLUMNS)
-        take = min(per_group, table.num_rows)
+    for position in tqdm(chosen, desc=f"{dataset.name}: shards"):
+        path = hf_hub_download(repo, shards[position], repo_type="dataset")
+        table = pq.ParquetFile(path).read(columns=COLUMNS)
+        take = min(per_shard, table.num_rows)
         rows = rng.choice(table.num_rows, size=take, replace=False)
-        batch = table.take(sorted(rows)).to_pylist()
-        for row in batch:
+        for row in table.take(sorted(rows)).to_pylist():
             records.append((dataset.name, position, row))
 
     # Trim to the requested size without re-biasing toward any part of the
     # sorted order: shuffle, cut, then restore the original order.
     rng.shuffle(records)
     records = records[:n_utterances]
-    records.sort(key=lambda r: r[1])
+    records.sort(key=lambda record: record[1])
     return records
 
 
 def write_records(records, audio_dir):
     audio_dir.mkdir(parents=True, exist_ok=True)
-    out = []
+    rows = []
     for dataset_name, _, row in tqdm(records, desc="decoding audio"):
         audio, sample_rate = sf.read(io.BytesIO(row["audio"]["bytes"]), dtype="float32")
         if audio.ndim > 1:
@@ -103,7 +97,7 @@ def write_records(records, audio_dir):
         utterance_id = f"{dataset_name}:{row['id']}".replace("/", "_")
         wav_path = audio_dir / f"{utterance_id}.wav"
         sf.write(wav_path, audio, SAMPLE_RATE, subtype="PCM_16")
-        out.append(
+        rows.append(
             {
                 "id": utterance_id,
                 "dataset": dataset_name,
@@ -112,24 +106,22 @@ def write_records(records, audio_dir):
                 "duration_s": float(row["audio_length_s"]),
             }
         )
-    return out
+    return rows
 
 
 def main(cfg):
     logger.info(f"githash={cfg.githash}")
     rng = np.random.default_rng(cfg.subset.seed)
-    fs = HfFileSystem()
 
     records = []
     for dataset in cfg.subset.datasets:
         records.extend(
             sample_dataset(
-                fs,
                 cfg.subset.dataset_path,
                 dataset,
                 cfg.subset.split,
                 cfg.subset.utterances_per_dataset,
-                cfg.subset.row_groups_per_dataset,
+                cfg.subset.shards_per_dataset,
                 rng,
             )
         )
@@ -138,15 +130,17 @@ def main(cfg):
     SUBSET_FILE.parent.mkdir(parents=True, exist_ok=True)
     save_jsonl(rows, SUBSET_FILE)
 
-    hours = sum(r["duration_s"] for r in rows) / 3600
+    hours = sum(row["duration_s"] for row in rows) / 3600
     logger.info(f"{len(rows)} utterances ({hours:.2f} h) -> {SUBSET_FILE}")
     for dataset in cfg.subset.datasets:
-        subset = [r for r in rows if r["dataset"] == dataset.name]
-        durations = np.array([r["duration_s"] for r in subset])
+        subset = [row for row in rows if row["dataset"] == dataset.name]
+        durations = np.array([row["duration_s"] for row in subset])
+        words = np.array([len(row["reference"].split()) for row in subset])
         logger.info(
-            f"  {dataset.name}: n={len(subset)} "
-            f"duration min/median/max = "
-            f"{durations.min():.1f}/{np.median(durations):.1f}/{durations.max():.1f}s"
+            f"  {dataset.name}: n={len(subset)}  "
+            f"duration min/median/max {durations.min():.1f}/"
+            f"{np.median(durations):.1f}/{durations.max():.1f}s  "
+            f"{words.sum()} reference words"
         )
 
 

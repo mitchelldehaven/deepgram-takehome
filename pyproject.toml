@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Reproducing and stress-testing the Open ASR Leaderboard"
 requires-python = ">=3.11"
 dependencies = [
+    "accelerate>=1.2.0",
     "regex>=2024.11.6",
     "datasets>=4.8.5",
     "deepgram-sdk>=3.7.0",

@@ -1,19 +1,27 @@
-### Run the end-to-end leaderboard reproduction
+### Run the end-to-end Open ASR Leaderboard reproduction
 set -eou pipefail
 export PYTHONPATH=.
+PY=.venv/bin/python
 
 # prepare directories
-python src/paths.py
+$PY src/paths.py
 
-# sample the evaluation subset and compute its metadata
-python src/data/build_subset.py
-python src/data/metadata.py
+# pull the published table we are going to be compared against
+$PY src/data/fetch_published.py
 
-# transcribe with every configured system (cached per system)
-python src/eval/transcribe.py
+# sample the evaluation subset and characterise it
+$PY src/data/build_subset.py
+$PY src/data/metadata.py
+
+# check the metadata is reliable enough to slice on, against injected ground truth
+$PY src/data/validate_metadata.py
+
+# transcribe with every configured system (cached per system in outputs/transcripts)
+# add `only=<system_name>` to run one, `overwrite=true` to force a re-run
+$PY src/eval/transcribe.py
 
 # score under both normalizers, with bootstrap CIs, against the published numbers
-python src/eval/score.py
+$PY src/eval/score.py
 
-# break results down by metadata, and test the metadata itself
-python src/eval/breakdown.py
+# break the results down by metadata, after testing the metadata itself
+$PY src/eval/breakdown.py
