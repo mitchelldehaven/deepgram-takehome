@@ -16,7 +16,8 @@ NON_SPEECH = re.compile(r"\[[^\]]*\]|\([^)]*\)|<[^>]*>")
 FILLERS = {"um", "uh", "mm", "hmm", "mhm", "uhhuh", "erm", "er", "ah", "eh"}
 PUNCT = re.compile(r"[^\w\s']", flags=re.UNICODE)
 APOSTROPHES = re.compile(r"[‘’ʼ´`]")
-NUMBER = re.compile(r"\d+(?:\.\d+)?")
+NUMBER = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
+MAGNITUDE = r"(?:hundred|thousand|million|billion|trillion)"
 WHITESPACE = re.compile(r"\s+")
 
 CONTRACTIONS = {
@@ -61,7 +62,7 @@ CURRENCY = {"$": "dollars", "£": "pounds", "€": "euros"}
 
 
 def spell_out(match):
-    value = match.group(0)
+    value = match.group(0).replace(",", "")
     try:
         if "." in value:
             return num2words(float(value))
@@ -81,9 +82,12 @@ def normalize(text, rules):
 
     if rules.normalize_currency:
         for symbol, word in CURRENCY.items():
-            # "$5" reads as "five dollars", so the symbol moves after the number
+            # "$5 million" is read "five million dollars": the unit follows the
+            # magnitude word when there is one, not the digits.
             text = re.sub(
-                rf"\{symbol}\s?({NUMBER.pattern})", rf"\1 {word}", text
+                rf"\{symbol}\s?({NUMBER.pattern})(\s+{MAGNITUDE})?",
+                lambda m, w=word: f"{m.group(1)}{m.group(2) or ''} {w}",
+                text,
             )
 
     if rules.expand_contractions:
@@ -93,12 +97,15 @@ def normalize(text, rules):
     if rules.british_to_american:
         text = " ".join(english_spelling_normalizer.get(w, w) for w in text.split())
 
-    if rules.collapse_hyphenation:
-        text = re.sub(r"(\w)-(\w)", r"\1\2", text)
-
     if rules.spell_out_numbers:
         text = NUMBER.sub(spell_out, text)
-        text = text.replace("-", " ").replace(",", " ")
+        # num2words emits "one thousand, two hundred"; the hyphens it also
+        # emits are left for the hyphenation rule below to treat exactly as it
+        # treats hyphens that were in the source text.
+        text = text.replace(",", " ")
+
+    if rules.collapse_hyphenation:
+        text = re.sub(r"(\w)-(\w)", r"\1\2", text)
 
     text = PUNCT.sub(" ", text)
 
