@@ -28,10 +28,17 @@ comes from `outputs/scores/`, and every run stamps its git hash into `logs/`.
    Nova-3 raw (6.05) and Qwen3-ASR (6.08) are separated by 0.04 WER where the
    paired bootstrap resolves ±0.35. The leaderboard presents them at ranks
    36, unranked, and 17.
-5. **WER hides what kind of error.** Whisper's WER is driven by *deletions*
-   (3.11 per 100 words, double everyone else's). A product team should read
-   that very differently from an equal-WER system that substitutes.
-6. **Our own metadata failed its first validation.** The SNR estimators are
+5. **WER hides what kind of error, and three added metrics disagree with it
+   about who wins.** Whisper's WER is driven by *deletions* (3.11 per 100
+   words, double everyone else's). Qwen3-ASR hallucinates three times less
+   than anything else and is separated from the whole field at p<0.001, while
+   sitting third on WER. Parakeet is first on WER and **last** on
+   hallucination.
+6. **Part of a vendor's WER is the benchmark's segmentation, not the model.**
+   Nova-3's edge deletions on AMI drop by a third when the audio is padded
+   with silence, which adds no information and so cannot be a recognition
+   gain. That closes 44% of its gap to Parakeet.
+7. **Our own metadata failed its first validation.** The SNR estimators are
    biased by +0.8 to +12.1 dB against injected ground truth. Their *ranking*
    is sound (ρ 0.92–0.98), so tercile breakdowns are defensible and absolute
    dB values are not.
@@ -215,38 +222,128 @@ correctness failure; for a voice agent extracting a confirmation number,
 dropping is far worse than substituting, because a substitution is often
 detectable downstream and a deletion is not.
 
-### The metric I'd add: keyword error rate
+### The three metrics I'd add
 
-**Definition.** Over reference occurrences of *rare content words* — words
-appearing in ≤3 of the 1200 references, length ≥4 — the fraction the
-hypothesis fails to produce. Rarity is measured in-set, so it is
-casing-independent and works across all three reference conventions.
-Vocabulary: 2,896 words, covering 1,019 of 1,200 utterances.
+All three answer the same question from different directions: *what does an
+average hide?* Each is a function `(references, hypotheses) -> per-utterance
+(numerator, denominator)`, which is what lets all four share one bootstrap, one
+significance test and one breakdown path. Thresholds are in
+`config/eval/openasr.yaml` so a reader can move them and rescore in seconds.
 
-**Whose decision it informs.** A buyer choosing ASR for an application where
-*which* words are wrong matters more than *how many*: contact-centre analytics
-keyed on product and account names, medical or legal transcription, meeting
-notes, voice agents doing entity capture. For them a WER tie is not a tie.
-
-**Result** (leaderboard normalizer):
-
-| System | WER | KER | KER 95% CI |
+| Metric | Definition | Denominator | Whose decision |
 |---|---|---|---|
-| deepgram-nova-3 (raw) | 6.05 | **5.91** | [5.06, 6.77] |
-| deepgram-nova-3 (formatted) | 6.62 | 6.08 | [5.20, 6.97] |
-| Qwen3-ASR-1.7B | 6.08 | 6.19 | [5.39, 7.03] |
-| parakeet-tdt-0.6b-v2 | **6.04** | 6.46 | [5.61, 7.31] |
-| whisper-large-v3 | 7.54 | 6.60 | [5.80, 7.49] |
+| **Catastrophic failure** | utterances whose own WER > 50% | utterances | staffing a human review queue, writing an SLA |
+| **Hallucination** | hypothesis ≥ 1.2× reference length | utterances | anyone for whom invented text is worse than missing text — legal, medical, voice agents |
+| **Edge error** | errors in the first/last 2 reference words | edge word slots | anyone benchmarking a prerecorded API on pre-segmented audio; and the benchmark's own designers |
 
-The ordering changes. Parakeet is first on WER and fourth on KER; Nova-3 is
-third on WER and first on KER; Whisper is last on WER but mid-pack on KER,
-because its deletions fall disproportionately on common words.
+The denominators differ on purpose, and the difference is the point. On this
+subset WER divides by 22,891 reference words, the two rate metrics by 1,194
+utterances, and the edge metric by 4,204 edge word slots. A rate over words and
+a rate over utterances answer different questions, and a system can look fine
+on one while being unshippable on the other.
 
-**This reordering is not statistically resolved.** Every KER interval overlaps
-every other. The honest claim is that KER *orders the systems differently from
-WER*, that the difference is in a direction that matters commercially, and
-that confirming it needs more data. Reporting it as "Nova-3 wins on keywords"
-would be overreach.
+### Result: the four metrics disagree about who wins
+
+Leaderboard normalizer, all 1,200 utterances:
+
+| System | WER | Catastrophic | Hallucination | Edge error |
+|---|---|---|---|---|
+| parakeet-tdt-0.6b-v2 | **6.04** | 2.26 | 2.01 | **8.82** |
+| deepgram-nova-3 (raw) | 6.05 | 2.51 | 1.76 | 10.28 |
+| Qwen3-ASR-1.7B | 6.08 | **2.01** | **0.59** | 9.04 |
+| deepgram-nova-3 (formatted) | 6.62 | 2.51 | 1.84 | 11.04 |
+| whisper-large-v3 | 7.54 | 3.02 | 1.68 | 12.25 |
+
+**Qwen3-ASR hallucinates three times less than anything else, and that is the
+one result here the sample resolves cleanly.** It is third on WER — inside a
+three-way tie — but its hallucination rate of 0.59 separates it from all four
+other configurations at p<0.001 (gaps of 1.17 to 1.42, every interval clear of
+zero). Four separated pairs out of ten, and all four are Qwen against the
+field.
+
+Meanwhile **Parakeet is first on WER and last on hallucination.** The system
+the leaderboard would hand you is the one most likely to invent material. For a
+voice agent reading back an order number, that is the wrong trade, and no
+amount of staring at the published column reveals it.
+
+**Whisper is second-best on hallucination despite being worst on WER.** That is
+consistent with its error composition above: it deletes, it does not invent.
+Whichever of those two failures you can tolerate decides whether Whisper's
+7.54 or Parakeet's 6.04 is the better number for you.
+
+### Where the catastrophic tail lives
+
+| System | AMI | GigaSpeech | SPGISpeech |
+|---|---|---|---|
+| whisper-large-v3 | **7.61** | 1.50 | 0.00 |
+| deepgram-nova-3 (raw) | 5.84 | 1.50 | 0.25 |
+| parakeet-tdt-0.6b-v2 | 5.58 | 1.25 | 0.00 |
+| Qwen3-ASR-1.7B | 5.08 | 1.00 | 0.00 |
+
+Unusable utterances are ~20× more common on meeting audio than on earnings
+calls, for every system. A pooled 2–3% is the average of "one in thirteen" and
+"never", which is not a number anyone can staff against.
+
+**Catastrophic failure is the one metric this sample cannot support.** Only 1 of
+10 system pairs separates. At a ~2.5% rate over 1,200 utterances there are
+roughly 30 events per system, so the metric is badly underpowered and I report
+it as directional only. That is a sample-size problem, not a reason to drop the
+metric — it is the first thing I would spend more utterances on, because it is
+also the metric with the most direct operational consequence.
+
+### Edge error, and why it is a measurement artifact as much as a result
+
+Errors concentrate at utterance boundaries for every system, because every
+utterance here is a slice cut out of a longer recording. Decomposed on AMI, per
+100 edge slots:
+
+| System | edge sub | edge del | edge ins | mid del |
+|---|---|---|---|---|
+| parakeet-tdt-0.6b-v2 | 5.27 | 2.59 | 3.39 | 1.88 |
+| deepgram-nova-3 (raw) | 5.00 | **6.52** | 3.75 | 2.71 |
+| Qwen3-ASR-1.7B | 4.64 | 4.91 | 2.14 | 3.59 |
+| whisper-large-v3 | 6.70 | **11.43** | 2.14 | 7.90 |
+
+Nova-3's deficit against Parakeet at the edges is **+3.93 deletions** with
+substitutions and insertions essentially level (−0.27, +0.36). It is omission,
+not invention.
+
+So I tested whether it was recoverable. `src/eval/padding_probe.py` re-runs
+Nova-3 with 0.5 s and 1.0 s of digital silence prepended and appended —
+which adds **no information**, so any improvement cannot be a recognition
+gain:
+
+| Condition | AMI WER | edge del | edge ins |
+|---|---|---|---|
+| unpadded | 9.99 | 6.52 | 3.75 |
+| +0.5 s silence | **9.27** | **4.38** | 2.50 |
+| +1.0 s silence | 9.48 | 4.64 | 2.41 |
+
+Edge deletions fall by a third, middle deletions do not move (2.71 → 2.78),
+and the WER change on AMI is −0.72 [−1.35, −0.09], p=0.022. Edge *insertions*
+fall too, so padding suppressed hallucination rather than inducing it over the
+new silence — the opposite of what I expected, and plausibly because an abrupt
+truncation mid-utterance is itself what reads as continuing speech.
+
+Three caveats, because this is the most over-claimable result in the report:
+
+1. **Eight tests were run; the Bonferroni threshold is 0.00625 and none
+   survive it.** The deletion effect is credible because it is large and
+   uniform in direction across all six dataset×condition cells, not because of
+   any single p-value.
+2. **It is not monotone.** 0.5 s beats 1.0 s, which argues against a simple
+   "the endpointer needs runway" story.
+3. **On SPGISpeech, deletions fell 52% but WER did not move**, because
+   insertions rose to compensate. My prediction that the clean corpus would be
+   an inert control was wrong: padding changes edge behaviour everywhere, it
+   only *helps* where deletions dominate.
+
+Padding closes about 44% of Nova-3's AMI gap to Parakeet (+1.65 → +0.93), so
+segmentation explains part of it and transcription conventions explain the
+rest. The decision this informs is concrete: **anyone benchmarking a
+prerecorded API against leaderboard numbers on pre-segmented corpora should
+pad the audio, or they are partly measuring the endpointer instead of the
+recognizer.**
 
 ---
 
@@ -341,10 +438,20 @@ corpus resembles your traffic is the only question a buyer actually has.
   per-script batching and precision. This is the most likely cause of the
   one-directional +0.58 reproduction gap and the first thing I would chase
   with more time.
-- **The keyword metric's vocabulary is defined in-set.** Document frequency
-  over 1,200 utterances is a noisy rarity estimate; a real deployment would
-  define the keyword list from the customer's own domain (product catalogue,
-  account names), which is both more accurate and more useful.
+- **Catastrophic failure rate is underpowered here.** At ~2.5% over 1,200
+  utterances it rests on ~30 events per system and separates 1 of 10 pairs. It
+  is reported as directional. More utterances would fix this, and it is where
+  I would spend them first.
+- **The hallucination metric uses length as a proxy.** A hypothesis 1.2x the
+  reference length is usually invention, but a system that substitutes two
+  words for one trips it without inventing anything, and one that replaces a
+  sentence with an equally long fabrication does not trip it at all. It is a
+  screen, not a verdict. It is also sensitive on short utterances, where a
+  3-word hypothesis against a 2-word reference is 50% over.
+- **An earlier keyword error rate was dropped rather than reported.** Its
+  vocabulary was defined in-set over 1,200 references, which is a noisy rarity
+  estimate, and every confidence interval overlapped every other, so it could
+  not support the reordering it appeared to show.
 - **Injected noise is friendlier than real noise.** Additive white and babble
   is not reverberation or overlapping speech, which is what actually makes AMI
   hard. The recovery figures are an upper bound on estimator quality.
@@ -420,7 +527,9 @@ wrong — it saturated at the grid maximum for every utterance and produced a
 confident, entirely spurious "metadata is unreliable" finding. The keyword
 metric's original capitalization-based vocabulary also looked plausible and
 silently excluded a third of the data, because GigaSpeech references are
-lowercase. The custom normalizer held three number-handling bugs, including
+lowercase -- that metric was later dropped for unrelated reasons, but the
+bug is why I stopped trusting plausible-looking code here. The custom
+normalizer held three number-handling bugs, including
 one where the same quantity tokenized differently depending on whether the
 source wrote `twenty-five` or `25` — which defeats the entire purpose of
 canonicalizing numbers, and which moved the top rank under our own normalizer

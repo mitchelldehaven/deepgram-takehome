@@ -14,8 +14,11 @@ Findings and limitations are in [REPORT.md](REPORT.md). This file is how to reru
    published numbers with bootstrap confidence intervals.
 2. **Test the normalization.** A second normalizer that disagrees with the
    leaderboard's on seven specific, individually ablatable rules.
-3. **Look past the metric.** A keyword error rate alongside WER, plus the
-   substitution/deletion/insertion split behind each WER.
+3. **Look past the metric.** Three metrics scored alongside WER --
+   catastrophic failure rate, hallucination rate and edge error rate -- plus
+   the substitution/deletion/insertion split behind each WER, and a probe
+   testing how much of one vendor's edge penalty is the benchmark's own
+   segmentation.
 4. **Characterize the data.** Per-utterance metadata, used to slice the
    results — and checked for reliability before it is used, with two
    independent estimators per acoustic field.
@@ -98,9 +101,10 @@ src/
     custom.py                  ours, rule-driven
   eval/
     transcribe.py              run systems, cache raw hypotheses
-    metrics.py                 WER, error breakdown, keyword error rate, bootstrap
+    metrics.py                 the four metrics, bootstrap, paired tests
     score.py                   scoring, published comparison, rule ablation
     breakdown.py               metadata reliability + slices
+    padding_probe.py           is an edge penalty the model or the segmentation?
 scripts/run_parakeet.py        NeMo inference, runs inside .venv-nemo
 tests/                         regression tests for the normalizer
 outputs/                       transcripts and score tables (gitignored)
@@ -143,5 +147,9 @@ numbers instead, which are.
 - **A normalization rule**: a flag in `config/normalization/custom.yaml` and a
   branch in `src/normalization/custom.py`. The ablation in `score.py` picks it
   up automatically.
-- **A metric**: a function in `src/eval/metrics.py`, called from `score.py` or
-  `breakdown.py`.
+- **A metric**: a function in `src/eval/metrics.py` returning per-utterance
+  `(numerator, denominator)`, plus one entry in `METRICS`. That is the whole
+  job -- bootstrap CIs, paired significance tests, per-dataset tables and the
+  metadata breakdowns all pick it up with no further change. The four current
+  metrics deliberately use different denominators (reference words,
+  utterances, utterances, edge word slots) to keep that contract honest.
