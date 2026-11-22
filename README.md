@@ -102,8 +102,22 @@ src/
     score.py                   scoring, published comparison, rule ablation
     breakdown.py               metadata reliability + slices
 scripts/run_parakeet.py        NeMo inference, runs inside .venv-nemo
+tests/                         regression tests for the normalizer
 outputs/                       transcripts and score tables (gitignored)
 ```
+
+## Tests
+
+```bash
+PYTHONPATH=. uv run pytest tests/ -q
+```
+
+They cover the custom normalizer's number handling, where three bugs lived
+long enough to reach a draft of the report. The useful property to preserve
+is that the same quantity normalizes identically whether the source wrote
+`twenty-five` or `25` -- otherwise canonicalizing numbers accomplishes
+nothing. The SNR estimators are validated separately, against injected
+ground truth, by `src/data/validate_metadata.py`.
 
 ## Notes on the data
 

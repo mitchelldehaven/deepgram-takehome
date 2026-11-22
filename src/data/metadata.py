@@ -77,7 +77,8 @@ def wada_curve(n_samples=200_000, seed=0):
     """Calibrate ratio -> SNR by simulating the model, rather than hardcoding
     the published lookup table (which I would be copying without being able to
     check it). Monte Carlo is reproducible, self-contained and verifiable:
-    tests/test_snr.py checks it recovers injected SNR on real speech.
+    src/data/validate_metadata.py checks it recovers injected SNR on real
+    speech, which is the real test of this curve.
     """
     rng = np.random.default_rng(seed)
     speech = rng.gamma(shape=0.4, scale=1.0, size=n_samples)

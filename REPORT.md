@@ -20,9 +20,9 @@ comes from `outputs/scores/`, and every run stamps its git hash into `logs/`.
    (p<0.001). Under a second defensible normalizer, that gap vanishes
    (+0.11, p=0.78). Same audio, same models, same metric — different text
    conventions.
-3. **Output formatting is worth up to 1.6 WER on its own.** The *same*
+3. **Output formatting is worth up to 1.4 WER on its own.** The *same*
    Nova-3 model on the *same* audio scores 0.56 (leaderboard normalizer) to
-   1.63 (ours) worse purely by leaving the API's punctuation and numeral
+   1.44 (ours) worse purely by leaving the API's punctuation and numeral
    formatting on. Nothing about the recognition changed.
 4. **The top three are statistically indistinguishable.** Parakeet (6.04),
    Nova-3 raw (6.05) and Qwen3-ASR (6.08) are separated by 0.04 WER where the
@@ -140,11 +140,11 @@ specific points, each independently togglable. These are not *better* choices
 | | Leaderboard normalizer | | Our normalizer | |
 |---|---|---|---|---|
 | | WER | 95% CI | WER | 95% CI |
-| parakeet-tdt-0.6b-v2 | **6.04** | [5.49, 6.66] | 8.59 | [7.92, 9.31] |
-| deepgram-nova-3 (raw) | 6.05 | [5.46, 6.68] | 8.63 | [7.99, 9.34] |
-| Qwen3-ASR-1.7B | 6.08 | [5.54, 6.66] | **8.59** | [7.93, 9.26] |
-| deepgram-nova-3 (formatted) | 6.62 | [6.04, 7.26] | 10.26 | [9.51, 11.01] |
-| whisper-large-v3 | 7.54 | [6.91, 8.22] | 10.15 | [9.40, 10.98] |
+| parakeet-tdt-0.6b-v2 | **6.04** | [5.49, 6.66] | **8.39** | [7.76, 9.11] |
+| deepgram-nova-3 (raw) | 6.05 | [5.46, 6.68] | 8.65 | [8.01, 9.36] |
+| Qwen3-ASR-1.7B | 6.08 | [5.54, 6.66] | 8.55 | [7.89, 9.23] |
+| deepgram-nova-3 (formatted) | 6.62 | [6.04, 7.26] | 10.10 | [9.38, 10.82] |
+| whisper-large-v3 | 7.54 | [6.91, 8.22] | 9.98 | [9.24, 10.80] |
 
 The load-bearing row is the last two. Under the leaderboard's normalizer,
 Nova-3 with default formatting **beats** Whisper by 0.92 WER, and the paired
@@ -158,13 +158,13 @@ Mean |ΔWER| across systems from flipping one rule:
 
 | Rule | Δ WER | What it does |
 |---|---|---|
-| `collapse_hyphenation` | 0.75 | "double-click" → "doubleclick" |
+| `collapse_hyphenation` | 0.66 | "double-click" → "doubleclick" |
 | `remove_fillers` | 0.63 | deletes um/uh/mm before scoring |
 | `expand_contractions` | 0.19 | "don't" → "do not" |
-| `spell_out_numbers` | 0.17 | digits ↔ words |
+| `spell_out_numbers` | 0.27 | digits ↔ words |
 | `keep_apostrophes` | 0.07 | |
 | `british_to_american` | 0.04 | |
-| `normalize_currency` | 0.00 | no effect on this data |
+| `normalize_currency` | 0.01 | near-no-op: no currency symbols in these refs |
 | `strip_non_speech` | 0.00 | these refs carry no `[laughter]` markers |
 
 Two rules account for most of it, and `remove_fillers` is the one to worry
@@ -181,13 +181,13 @@ Nova-3 twice, same model, same audio, differing only in API flags
 | Normalizer | raw | formatted | Δ | p |
 |---|---|---|---|---|
 | leaderboard | 6.05 | 6.62 | **+0.56** | <0.001 |
-| ours | 8.63 | 10.26 | **+1.63** | <0.001 |
+| ours | 8.65 | 10.10 | **+1.44** | <0.001 |
 
 The open models the board ranks emit bare lowercase text; the normalizer grew
 up around that convention and handles it cleanly. A commercial API that
 returns production-ready formatted text is penalised for it. **Anyone
 benchmarking a formatting API against leaderboard numbers must turn formatting
-off first, or they will measure the wrong thing by up to 1.6 WER** — larger
+off first, or they will measure the wrong thing by up to 1.4 WER** — larger
 than the gap between ranks 17 and 53 on these datasets.
 
 ---
@@ -348,10 +348,18 @@ corpus resembles your traffic is the only question a buyer actually has.
 - **Injected noise is friendlier than real noise.** Additive white and babble
   is not reverberation or overlapping speech, which is what actually makes AMI
   hard. The recovery figures are an upper bound on estimator quality.
-- **`spell_out_numbers` is imperfect.** `$5.50` becomes "five point five
-  dollars" rather than "five fifty". It is applied identically to reference
-  and hypothesis so it does not bias the comparison, but it is not how anyone
-  speaks.
+- **`spell_out_numbers` is still imperfect.** `$5.50` becomes "five point
+  five dollars" rather than "five fifty". It is applied identically to
+  reference and hypothesis so it does not bias the comparison, but it is not
+  how anyone speaks.
+- **Our normalizer's currency path is effectively untested.** These three
+  reference sets contain **zero** currency symbols and **one** comma-grouped
+  number across 1,200 utterances, so `normalize_currency` ablates to 0.01 and
+  the thousands-separator handling fires once. Three real bugs lived in that
+  code until I spot-checked it on handwritten sentences (see *Where I used
+  AI*); on financial or medical audio, where number handling matters most,
+  this is the part of the normalizer I would least trust without first
+  writing it a proper test set.
 - **No multi-seed subset.** One sample at seed 42. Re-drawing the subset would
   give a cleaner estimate of sampling variance than the bootstrap alone.
 
@@ -406,13 +414,22 @@ metadata against injected ground truth rather than settle for two estimators
 agreeing; and every claim in this report about what is and isn't statistically
 supported.
 
-**Two findings came from distrusting the AI-written code rather than reading
-it.** The WADA-SNR implementation looked plausible and was wrong — it
-saturated at the grid maximum for every utterance and produced a confident,
-entirely spurious "metadata is unreliable" finding. The keyword metric's
-original capitalization-based vocabulary also looked plausible and silently
-excluded a third of the data, because GigaSpeech references are lowercase.
-Both were caught by checking outputs against expectations, not by code review.
-That is the main thing I'd carry into doing this work at scale: generated
-analysis code fails in ways that produce *publishable-looking numbers*, so the
-validation has to be adversarial and empirical.
+**Three times, the useful finding came from distrusting the AI-written code
+rather than reading it.** The WADA-SNR implementation looked plausible and was
+wrong — it saturated at the grid maximum for every utterance and produced a
+confident, entirely spurious "metadata is unreliable" finding. The keyword
+metric's original capitalization-based vocabulary also looked plausible and
+silently excluded a third of the data, because GigaSpeech references are
+lowercase. The custom normalizer held three number-handling bugs, including
+one where the same quantity tokenized differently depending on whether the
+source wrote `twenty-five` or `25` — which defeats the entire purpose of
+canonicalizing numbers, and which moved the top rank under our own normalizer
+once fixed.
+
+Each was found the same way: by making the code emit output a human could
+eyeball, on inputs chosen to be awkward, and reading it. None was found by
+code review — all three passed a careful read. That is the main thing I'd
+carry into doing this work at scale. Generated analysis code fails in ways
+that produce *publishable-looking numbers*, and the numbers are the artifact
+nobody checks, because checking them is the work the numbers were supposed to
+replace.
