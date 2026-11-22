@@ -79,5 +79,10 @@ scoring:
   bootstrap_samples: 2000
   confidence: 0.95
   seed: 42
-  keyword_max_df: 3        # a word in <=3 of the 1200 references counts as rare
-  keyword_min_length: 4
+  # Thresholds for the three metrics added alongside WER. They are config
+  # rather than constants because each is a judgement call, and the honest
+  # response to a judgement call is to let a reader move it and rescore --
+  # which costs seconds, since transcripts are cached.
+  catastrophic_threshold: 0.5   # per-utterance WER above this is unusable
+  hallucination_ratio: 1.2      # hypothesis >= 1.2x reference length is invention
+  edge_words: 2                 # first and last N reference words are the "edges"

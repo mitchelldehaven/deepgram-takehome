@@ -125,9 +125,10 @@ def text_features(reference):
         "n_words": len(words),
         "disfluency_rate": sum(w in DISFLUENCIES for w in words) / n_words,
         "numeric_rate": sum(bool(HAS_DIGIT.search(t)) for t in reference.split()) / n_words,
-        # Mid-sentence capitalised tokens: a crude proxy for named entities,
-        # and the keyword set our added metric scores against. Crude on
-        # purpose -- breakdown.py measures how crude.
+        # Mid-sentence capitalised tokens: a crude proxy for named entity
+        # density, kept as a descriptive field. Crude on purpose, and not
+        # scored against -- GigaSpeech references are entirely lowercase, so
+        # this field is not comparable across the three corpora.
         "n_caps": sum(
             1
             for token in reference.split()[1:]

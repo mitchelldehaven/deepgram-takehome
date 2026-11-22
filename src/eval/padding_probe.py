@@ -25,21 +25,22 @@ wrong.
 import dirtygit
 import numpy as np
 import pandas as pd
-from jiwer import process_words
 from loguru import logger
 from omegaconf import OmegaConf
 
 from src.config import load_config, setup_logging
 from src.data.utils import load_jsonl
-from src.eval.metrics import counts, paired_bootstrap, wer_from_counts
+from src.eval.metrics import (
+    counts,
+    edge_breakdown,
+    paired_bootstrap,
+    wer_from_counts,
+)
 from src.eval.score import aligned
 from src.normalization.factory import build_normalizer
 from src.paths import CONFIG_DIR, SCORES_DIR, SUBSET_FILE, TRANSCRIPTS_DIR
 
 DEFAULT_CONFIG = CONFIG_DIR / "eval" / "padding_probe.yaml"
-
-EDGE_WORDS = 2      # how many reference words at each end count as "edge"
-MIN_REF_WORDS = 6   # below this, edge and middle overlap and the split is meaningless
 
 
 def load_hypotheses(name):
@@ -47,44 +48,6 @@ def load_hypotheses(name):
     if not path.exists():
         return None
     return {row["id"]: row["hypothesis"] for row in load_jsonl(path)}
-
-
-def edge_errors(references, hypotheses):
-    """Substitutions, deletions and insertions at the edges and in the middle.
-
-    Counted against reference word positions, so the denominators are word
-    slots rather than utterances and the two regions are directly comparable.
-    """
-    edge = {"sub": 0, "del": 0, "ins": 0}
-    middle = {"sub": 0, "del": 0, "ins": 0}
-    edge_slots = middle_slots = 0
-    kinds = {"substitute": "sub", "delete": "del", "insert": "ins"}
-
-    for reference, hypothesis in zip(references, hypotheses):
-        ref_words = reference.split()
-        if len(ref_words) < MIN_REF_WORDS:
-            continue
-        n = len(ref_words)
-        edge_index = set(range(EDGE_WORDS)) | set(range(n - EDGE_WORDS, n))
-        edge_slots += 2 * EDGE_WORDS
-        middle_slots += n - 2 * EDGE_WORDS
-
-        output = process_words([reference], [hypothesis if hypothesis.strip() else " "])
-        for chunk in output.alignments[0]:
-            if chunk.type == "equal":
-                continue
-            kind = kinds[chunk.type]
-            # An insertion occupies no reference positions, so anchor it to the
-            # reference index it was inserted at.
-            span = range(chunk.ref_start_idx, max(chunk.ref_end_idx, chunk.ref_start_idx + 1))
-            if kind == "ins":
-                weight = chunk.hyp_end_idx - chunk.hyp_start_idx
-            else:
-                weight = chunk.ref_end_idx - chunk.ref_start_idx
-            target = edge if any(i in edge_index for i in span) else middle
-            target[kind] += weight
-
-    return edge, middle, edge_slots, middle_slots
 
 
 def condition_table(subset, transcripts, normalizer):
@@ -95,7 +58,7 @@ def condition_table(subset, transcripts, normalizer):
             mask = slice(None) if dataset == "ALL" else (datasets == dataset)
             refs = list(np.array(references)[mask])
             hs = list(np.array(hyps)[mask])
-            edge, middle, edge_slots, middle_slots = edge_errors(refs, hs)
+            edge, middle, edge_slots, middle_slots = edge_breakdown(refs, hs)
             rows.append(
                 {
                     "condition": name,

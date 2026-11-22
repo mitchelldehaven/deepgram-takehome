@@ -1,10 +1,15 @@
 """Score the cached transcripts, under each normalizer, against the published numbers.
 
-Produces four tables in outputs/scores/:
-  wer.csv          system x dataset x normalizer, with bootstrap CIs
-  published.csv    ours vs the leaderboard's, and the gap
-  ablation.csv     WER attributable to each individual normalization rule
-  pairwise.csv     paired bootstrap on every system pair, per normalizer
+Produces five tables in outputs/scores/:
+  metrics.csv            metric x system x dataset x normalizer, with bootstrap CIs
+  error_composition.csv  substitutions / deletions / insertions behind each WER
+  published.csv          ours vs the leaderboard's, and the gap
+  ablation.csv           WER attributable to each individual normalization rule
+  pairwise.csv           paired bootstrap on every system pair, per metric
+
+All four metrics in src.eval.metrics.METRICS are scored, not just WER: the
+leaderboard's number is one of them, and the point of the other three is that
+they disagree with it about which system to ship.
 
 Nothing here re-runs a model. Changing a normalization rule and rescoring is
 seconds, which is the point of caching raw hypotheses in transcribe.py.
@@ -20,6 +25,7 @@ from omegaconf import OmegaConf
 from src.config import load_config, setup_logging
 from src.data.utils import load_jsonl
 from src.eval.metrics import (
+    METRICS,
     bootstrap_ci,
     counts,
     error_breakdown,
@@ -60,21 +66,66 @@ def aligned(subset, hypotheses, normalizer):
     return references, hyps, np.array(datasets)
 
 
+def metric_kwargs(cfg, metric):
+    """Thresholds live in config, so a reviewer can move them and rescore."""
+    if metric == "catastrophic":
+        return {"threshold": cfg.scoring.catastrophic_threshold}
+    if metric == "hallucination":
+        return {"ratio": cfg.scoring.hallucination_ratio}
+    if metric == "edge_error":
+        return {"edge_words": cfg.scoring.edge_words}
+    return {}
+
+
 def score_table(cfg, subset, transcripts, normalizers):
+    """Every metric, every system, every dataset, under every normalizer.
+
+    `denominator` is reported alongside the value because the four metrics do
+    not share one: WER is per reference word, two are per utterance, and the
+    edge metric is per edge word slot. A reader comparing two rows needs to
+    know which.
+    """
     rows = []
     for norm_name, normalizer in normalizers.items():
         for system_name, hypotheses in transcripts.items():
             references, hyps, datasets = aligned(subset, hypotheses, normalizer)
-            pairs = counts(references, hyps)
+            for metric, function in METRICS.items():
+                pairs = function(references, hyps, **metric_kwargs(cfg, metric))
+                for dataset in list(dict.fromkeys(datasets)) + ["ALL"]:
+                    mask = slice(None) if dataset == "ALL" else (datasets == dataset)
+                    subset_pairs = pairs[mask]
+                    point, lower, upper = bootstrap_ci(
+                        subset_pairs,
+                        cfg.scoring.bootstrap_samples,
+                        cfg.scoring.confidence,
+                        cfg.scoring.seed,
+                    )
+                    rows.append(
+                        {
+                            "metric": metric,
+                            "normalizer": norm_name,
+                            "system": system_name,
+                            "dataset": dataset,
+                            "n_utterances": len(subset_pairs),
+                            "denominator": int(subset_pairs[:, 1].sum()),
+                            "value": 100 * point,
+                            "ci_low": 100 * lower,
+                            "ci_high": 100 * upper,
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def composition_table(cfg, subset, transcripts, normalizers):
+    """What the WER is made of. Two systems at one WER can be very different
+    products: one that deletes is quietly lossy, one that inserts is noisily
+    wrong."""
+    rows = []
+    for norm_name, normalizer in normalizers.items():
+        for system_name, hypotheses in transcripts.items():
+            references, hyps, datasets = aligned(subset, hypotheses, normalizer)
             for dataset in list(dict.fromkeys(datasets)) + ["ALL"]:
                 mask = slice(None) if dataset == "ALL" else (datasets == dataset)
-                subset_pairs = pairs[mask]
-                point, lower, upper = bootstrap_ci(
-                    subset_pairs,
-                    cfg.scoring.bootstrap_samples,
-                    cfg.scoring.confidence,
-                    cfg.scoring.seed,
-                )
                 errors = error_breakdown(
                     list(np.array(references)[mask]), list(np.array(hyps)[mask])
                 )
@@ -83,10 +134,6 @@ def score_table(cfg, subset, transcripts, normalizers):
                         "normalizer": norm_name,
                         "system": system_name,
                         "dataset": dataset,
-                        "n": len(subset_pairs),
-                        "wer": 100 * point,
-                        "ci_low": 100 * lower,
-                        "ci_high": 100 * upper,
                         "sub": 100 * errors["sub"],
                         "del": 100 * errors["del"],
                         "ins": 100 * errors["ins"],
@@ -109,7 +156,8 @@ def published_comparison(cfg, wer_df):
         if system_cfg.leaderboard_id not in published.index:
             continue
         for _, row in wer_df[
-            (wer_df.system == system_cfg.name)
+            (wer_df.metric == "wer")
+            & (wer_df.system == system_cfg.name)
             & (wer_df.normalizer == "leaderboard")
             & (wer_df.dataset != "ALL")
         ].iterrows():
@@ -122,7 +170,7 @@ def published_comparison(cfg, wer_df):
                 {
                     "system": system_cfg.name,
                     "dataset": row.dataset,
-                    "ours": row.wer,
+                    "ours": row.value,
                     "ci_low": row.ci_low,
                     "ci_high": row.ci_high,
                     "published": theirs,
@@ -169,49 +217,65 @@ def ablation(cfg, subset, transcripts):
 
 
 def pairwise(cfg, subset, transcripts, normalizers):
-    """Is the gap between two systems bigger than the sample can resolve?"""
+    """Is the gap between two systems bigger than the sample can resolve?
+
+    Run for every metric, because the answer differs: a sample that cannot
+    separate two systems on WER may separate them cleanly on how often they
+    fail badly, which is the more decision-relevant of the two.
+    """
     rows = []
     for norm_name, normalizer in normalizers.items():
-        pairs_by_system = {}
-        for system_name, hypotheses in transcripts.items():
-            references, hyps, _ = aligned(subset, hypotheses, normalizer)
-            pairs_by_system[system_name] = counts(references, hyps)
-        for a, b in itertools.combinations(sorted(pairs_by_system), 2):
-            delta, lower, upper, p = paired_bootstrap(
-                pairs_by_system[a],
-                pairs_by_system[b],
-                cfg.scoring.bootstrap_samples,
-                cfg.scoring.confidence,
-                cfg.scoring.seed,
-            )
-            rows.append(
-                {
-                    "normalizer": norm_name,
-                    "system_a": a,
-                    "system_b": b,
-                    "delta_wer": 100 * delta,
-                    "ci_low": 100 * lower,
-                    "ci_high": 100 * upper,
-                    "p_value": p,
-                    "separated": bool(lower > 0 or upper < 0),
-                }
-            )
+        for metric, function in METRICS.items():
+            pairs_by_system = {}
+            for system_name, hypotheses in transcripts.items():
+                references, hyps, _ = aligned(subset, hypotheses, normalizer)
+                pairs_by_system[system_name] = function(
+                    references, hyps, **metric_kwargs(cfg, metric)
+                )
+            for a, b in itertools.combinations(sorted(pairs_by_system), 2):
+                delta, lower, upper, p = paired_bootstrap(
+                    pairs_by_system[a],
+                    pairs_by_system[b],
+                    cfg.scoring.bootstrap_samples,
+                    cfg.scoring.confidence,
+                    cfg.scoring.seed,
+                )
+                rows.append(
+                    {
+                        "metric": metric,
+                        "normalizer": norm_name,
+                        "system_a": a,
+                        "system_b": b,
+                        "delta": 100 * delta,
+                        "ci_low": 100 * lower,
+                        "ci_high": 100 * upper,
+                        "p_value": p,
+                        "separated": bool(lower > 0 or upper < 0),
+                    }
+                )
     return pd.DataFrame(rows)
 
 
-def log_rankings(wer_df):
-    for norm_name in wer_df.normalizer.unique():
-        overall = (
-            wer_df[(wer_df.normalizer == norm_name) & (wer_df.dataset == "ALL")]
-            .sort_values("wer")
-            .reset_index(drop=True)
-        )
-        logger.info(f"ranking under '{norm_name}':")
-        for rank, row in overall.iterrows():
-            logger.info(
-                f"  {rank + 1}. {row.system:<24} "
-                f"{row.wer:5.2f}  [{row.ci_low:.2f}, {row.ci_high:.2f}]"
+def log_rankings(table):
+    """Rank under each metric. Where the orderings disagree, the leaderboard's
+    single number is making a choice it does not disclose."""
+    for norm_name in table.normalizer.unique():
+        for metric in METRICS:
+            overall = (
+                table[
+                    (table.normalizer == norm_name)
+                    & (table.dataset == "ALL")
+                    & (table.metric == metric)
+                ]
+                .sort_values("value")
+                .reset_index(drop=True)
             )
+            logger.info(f"ranking under '{norm_name}' by {metric}:")
+            for rank, row in overall.iterrows():
+                logger.info(
+                    f"  {rank + 1}. {row.system:<26} "
+                    f"{row.value:5.2f}  [{row.ci_low:.2f}, {row.ci_high:.2f}]"
+                )
 
 
 def main(cfg):
@@ -223,11 +287,14 @@ def main(cfg):
     normalizers = {name: build_normalizer(name) for name in cfg.normalization}
     SCORES_DIR.mkdir(parents=True, exist_ok=True)
 
-    wer_df = score_table(cfg, subset, transcripts, normalizers)
-    wer_df.to_csv(SCORES_DIR / "wer.csv", index=False)
-    log_rankings(wer_df)
+    table = score_table(cfg, subset, transcripts, normalizers)
+    table.to_csv(SCORES_DIR / "metrics.csv", index=False)
+    log_rankings(table)
 
-    comparison = published_comparison(cfg, wer_df)
+    composition = composition_table(cfg, subset, transcripts, normalizers)
+    composition.to_csv(SCORES_DIR / "error_composition.csv", index=False)
+
+    comparison = published_comparison(cfg, table)
     if not comparison.empty:
         comparison.to_csv(SCORES_DIR / "published.csv", index=False)
         logger.info("ours vs published (leaderboard normalizer):")
@@ -253,14 +320,17 @@ def main(cfg):
 
     pairwise_df = pairwise(cfg, subset, transcripts, normalizers)
     pairwise_df.to_csv(SCORES_DIR / "pairwise.csv", index=False)
-    unresolved = pairwise_df[~pairwise_df.separated]
-    if len(unresolved):
-        logger.info("pairs this sample cannot separate:")
-        for _, row in unresolved.iterrows():
-            logger.info(
-                f"  [{row.normalizer}] {row.system_a} vs {row.system_b}: "
-                f"{row.delta_wer:+.2f} [{row.ci_low:+.2f}, {row.ci_high:+.2f}] p={row.p_value:.3f}"
-            )
+    for metric in METRICS:
+        unresolved = pairwise_df[
+            (~pairwise_df.separated) & (pairwise_df.metric == metric)
+        ]
+        resolved = pairwise_df[
+            pairwise_df.separated & (pairwise_df.metric == metric)
+        ]
+        logger.info(
+            f"{metric}: {len(resolved)} of {len(resolved) + len(unresolved)} "
+            f"system pairs separated by this sample"
+        )
 
     logger.info(f"tables -> {SCORES_DIR}")
 
