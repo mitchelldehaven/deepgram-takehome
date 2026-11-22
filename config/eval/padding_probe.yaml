@@ -1,0 +1,44 @@
+# Does Nova-3's edge-deletion penalty survive giving its endpointer runway?
+#
+# Nova-3 deletes words at utterance edges on AMI at 6.52 per 100 edge slots
+# against Parakeet's 2.59, with insertions identical between them. Two
+# explanations fit that: the API's endpointing truncates at a hard cut, or the
+# words are simply not in the audio and nothing can recover them.
+#
+# Padding with digital silence separates them, because it adds runway without
+# adding information. Run with:
+#   PYTHONPATH=. .venv/bin/python src/eval/transcribe.py \
+#       --config config/eval/padding_probe.yaml
+# then src/eval/padding_probe.py to score it.
+#
+# Kept out of config/eval/openasr.yaml on purpose: these are the same model as
+# deepgram_nova_3_raw and would otherwise pad the headline tables and the
+# pairwise matrix with rows that are not separate systems.
+
+systems:
+  - name: deepgram_nova_3_pad_05
+    backend: deepgram
+    model: nova-3
+    leaderboard_id: null
+    smart_format: false
+    punctuate: false
+    numerals: false
+    pad_silence_s: 0.5
+    concurrency: 8
+  - name: deepgram_nova_3_pad_10
+    backend: deepgram
+    model: nova-3
+    leaderboard_id: null
+    smart_format: false
+    punctuate: false
+    numerals: false
+    pad_silence_s: 1.0
+    concurrency: 8
+
+# The condition these are compared against: identical flags, no padding.
+baseline: deepgram_nova_3_raw
+
+scoring:
+  bootstrap_samples: 2000
+  confidence: 0.95
+  seed: 42

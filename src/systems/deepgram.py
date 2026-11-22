@@ -2,6 +2,7 @@ import io
 import os
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import soundfile as sf
 from deepgram import DeepgramClient
 from dotenv import load_dotenv
@@ -28,9 +29,28 @@ class DeepgramSystem(ASRSystem):
             raise RuntimeError("DEEPGRAM_API_KEY not set (see .env, and the README)")
         self.client = DeepgramClient(api_key=key)
 
+    def pad(self, audio):
+        """Optionally bracket the utterance with digital silence.
+
+        These utterances are slices cut out of continuous recordings, so the
+        first and last words can start or stop mid-word at the cut. A
+        prerecorded API does its own endpointing and expects whole-call audio,
+        so it meets a hard onset at sample zero. Padding gives the endpointer
+        runway *without adding any information*: if edge deletions fall, they
+        were an artifact of the cut rather than of the speech.
+
+        It is not a free lunch -- silence is also where a model is most free to
+        hallucinate -- so src/eval/padding_probe.py measures both directions.
+        """
+        seconds = float(self.cfg.get("pad_silence_s", 0.0))
+        if seconds <= 0:
+            return audio
+        silence = np.zeros(int(seconds * SAMPLE_RATE), dtype=audio.dtype)
+        return np.concatenate([silence, audio, silence])
+
     def transcribe_one(self, item):
         buffer = io.BytesIO()
-        sf.write(buffer, item["audio"], SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        sf.write(buffer, self.pad(item["audio"]), SAMPLE_RATE, format="WAV", subtype="PCM_16")
         try:
             response = self.client.listen.v1.media.transcribe_file(
                 request=buffer.getvalue(),
