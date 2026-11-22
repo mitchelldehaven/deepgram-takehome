@@ -174,7 +174,7 @@ def published_comparison(cfg, wer_df):
                     "ci_low": row.ci_low,
                     "ci_high": row.ci_high,
                     "published": theirs,
-                    "gap": row.wer - theirs,
+                    "gap": row.value - theirs,
                     "published_in_ci": bool(row.ci_low <= theirs <= row.ci_high),
                 }
             )
