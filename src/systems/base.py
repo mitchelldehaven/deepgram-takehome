@@ -1,13 +1,38 @@
 """Common interface every ASR system implements, so adding one is a single file."""
 from abc import ABC, abstractmethod
 
+import numpy as np
+import soundfile as sf
 from tqdm import tqdm
 
 SAMPLE_RATE = 16_000
 
 
+def read_audio(item):
+    """Attach decoded audio to an item, in place, and return the item.
+
+    Audio is loaded per batch rather than for the whole set up front. At
+    subset size that is an irrelevant difference; on a full test split the
+    eager version is ~33 GB of float32 resident before the first token is
+    decoded, which is the kind of limit that only shows up once the thing is
+    actually run at scale.
+    """
+    if "audio" not in item:
+        audio, _ = sf.read(item["audio_path"], dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        item["audio"] = np.asarray(audio, dtype=np.float32)
+    return item
+
+
 class ASRSystem(ABC):
-    """A batch of items is a list of {"id", "audio" (float32 @16k), "reference"}."""
+    """A batch of items is a list of {"id", "audio_path", "reference", "dataset"}.
+
+    `transcribe` receives items with "audio" already attached. A system that
+    overrides `transcribe_all` is responsible for its own loading, and may
+    prefer not to load at all: ParakeetSystem hands the paths straight to
+    NeMo.
+    """
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -34,5 +59,8 @@ class ASRSystem(ABC):
         hypotheses = []
         batch_size = self.cfg.get("batch_size", 8)
         for start in tqdm(range(0, len(items), batch_size), desc=self.name):
-            hypotheses.extend(self.transcribe(items[start : start + batch_size]))
+            batch = [read_audio(item) for item in items[start : start + batch_size]]
+            hypotheses.extend(self.transcribe(batch))
+            for item in batch:
+                item.pop("audio", None)
         return hypotheses

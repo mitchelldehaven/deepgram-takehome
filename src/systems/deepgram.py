@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from tqdm import tqdm
 
-from src.systems.base import SAMPLE_RATE, ASRSystem
+from src.systems.base import SAMPLE_RATE, ASRSystem, read_audio
 
 
 class DeepgramSystem(ASRSystem):
@@ -50,7 +50,8 @@ class DeepgramSystem(ASRSystem):
 
     def transcribe_one(self, item):
         buffer = io.BytesIO()
-        sf.write(buffer, self.pad(item["audio"]), SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        audio = read_audio(item)["audio"]
+        sf.write(buffer, self.pad(audio), SAMPLE_RATE, format="WAV", subtype="PCM_16")
         try:
             response = self.client.listen.v1.media.transcribe_file(
                 request=buffer.getvalue(),

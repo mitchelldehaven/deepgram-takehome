@@ -7,8 +7,6 @@ makes it cheap to change a normalization rule and rescore, which is most of
 what this exercise asks for.
 """
 import dirtygit
-import numpy as np
-import soundfile as sf
 from loguru import logger
 from omegaconf import OmegaConf
 
@@ -21,18 +19,16 @@ DEFAULT_CONFIG = CONFIG_DIR / "eval" / "openasr.yaml"
 
 
 def load_items(subset):
-    items = []
-    for row in subset:
-        audio, _ = sf.read(PROCESSED_DIR.parent / row["audio_path"], dtype="float32")
-        items.append(
-            {
-                "id": row["id"],
-                "audio": np.asarray(audio, dtype=np.float32),
-                "reference": row["reference"],
-                "dataset": row["dataset"],
-            }
-        )
-    return items
+    """Item metadata only. The audio is read per batch, by the systems."""
+    return [
+        {
+            "id": row["id"],
+            "audio_path": str(PROCESSED_DIR.parent / row["audio_path"]),
+            "reference": row["reference"],
+            "dataset": row["dataset"],
+        }
+        for row in subset
+    ]
 
 
 def run_system(system_cfg, items, overwrite):

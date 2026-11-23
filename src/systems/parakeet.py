@@ -3,10 +3,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import soundfile as sf
-
 from src.paths import ROOT_DIR
-from src.systems.base import SAMPLE_RATE, ASRSystem
+from src.systems.base import ASRSystem
 
 RUNNER = ROOT_DIR / "scripts" / "run_parakeet.py"
 
@@ -26,7 +24,13 @@ class ParakeetSystem(ASRSystem):
 
     def transcribe_all(self, items):
         """One subprocess for the whole set: NeMo takes ~30s to load weights,
-        so per-batch spawning would cost more than the inference does."""
+        so per-batch spawning would cost more than the inference does.
+
+        The manifest points at the sampled wavs already on disk rather than
+        copying them into a temp directory. They are already 16 kHz mono
+        PCM_16, which is what NeMo wants, and on a full test split the copy
+        would be ~17 GB written to be read once.
+        """
         batch = items
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -34,10 +38,11 @@ class ParakeetSystem(ASRSystem):
             out_path = tmp / "out.jsonl"
             with open(manifest, "w") as f:
                 for item in batch:
-                    wav = tmp / f"{item['id']}.wav"
-                    sf.write(wav, item["audio"], SAMPLE_RATE)
                     f.write(
-                        json.dumps({"id": item["id"], "audio_filepath": str(wav)}) + "\n"
+                        json.dumps(
+                            {"id": item["id"], "audio_filepath": item["audio_path"]}
+                        )
+                        + "\n"
                     )
             subprocess.run(
                 [
