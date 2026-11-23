@@ -93,6 +93,49 @@ Useful overrides:
 .venv/bin/python src/data/build_subset.py subset.utterances_per_dataset=100
 ```
 
+## Validating the subset against the full splits
+
+`config/eval/full.yaml` + `src/eval/subset_validation.py` run the identical
+pipeline over **every row of all three test splits** (~65,900 utterances,
+~144 h, ~16 GB of audio, open models only) and compare it to the
+1,200-utterance subset the report is written from.
+
+**This is provided as runnable code, not as a result. REPORT.md does not rely
+on it and makes no claim from it.** It was written last and the run takes a
+few hours on one GPU; if the numbers are not in REPORT.md, the run had not
+finished.
+
+What it measures, isolating three effects that are otherwise confounded:
+
+```
+A  subset ids, subset run   the number in REPORT.md
+B  subset ids, full run     same audio, same config, different batch neighbours
+C  all ids,    full run     the whole split
+D  published
+
+A->B  batch composition -- REPORT.md asserts this matters for Whisper
+B->C  sampling, cleanly isolated
+C->D  what is left: decoding config, model version. Sampling cannot be here.
+```
+
+plus the calibration check that motivated it: **does the full-split WER fall
+inside the 95% CI the 400-row sample predicted?**
+
+```bash
+export PYTHONPATH=. RUN_TAG=full
+.venv/bin/python src/data/build_subset.py --config config/eval/full.yaml
+.venv/bin/python src/eval/transcribe.py   --config config/eval/full.yaml
+.venv/bin/python src/eval/score.py        --config config/eval/full.yaml
+.venv/bin/python src/eval/subset_validation.py
+```
+
+`RUN_TAG` (see `src/paths.py`) tags only what a run *produces* —
+`data/processed-full/`, `outputs-full/` — so a full run cannot overwrite the
+subset run. Batch sizes in `full.yaml` are deliberately identical to
+`openasr.yaml`: batching changes padding and padding changes Whisper's output,
+so raising them would confound "full split vs subset" with "different
+decoding configuration".
+
 ## Comparing two arms
 
 `src/eval/compare.py` answers "where, exactly, do these two differ". An *arm*
@@ -157,6 +200,7 @@ src/
     score.py                   scoring, published comparison, rule ablation
     breakdown.py               metadata reliability, slices, length decomposition
     compare.py                 diff two arms, utterance by utterance
+    subset_validation.py       subset vs full splits (runnable; not run in the report)
     padding_probe.py           is an edge penalty the model or the segmentation?
 scripts/run_parakeet.py        NeMo inference, runs inside .venv-nemo
 tests/                         regression tests: normalizer, metrics, diff tool
