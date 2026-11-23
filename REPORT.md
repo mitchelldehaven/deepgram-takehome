@@ -40,14 +40,14 @@ comes from `outputs/scores/`, and every run stamps its git hash into `logs/`.
    Nova-3's edge deletions on AMI drop by a third when the audio is padded
    with silence, which adds no information and so cannot be a recognition
    gain. That closes 44% of its gap to Parakeet.
-7. **Utterance duration is the largest effect in the data, and about half of
-   it is the benchmark's segmentation.** WER runs 2.5× higher on the shortest
-   duration tercile than the middle one — bigger than any model difference
-   here. At *matched* absolute duration AMI is no harder than GigaSpeech, so
-   most of "AMI is the hard corpus" is that AMI's utterances are short. And
-   47–59% of the short-vs-long gap is pure composition: a short utterance is
-   mostly first-and-last words, which is exactly where pre-segmented audio is
-   cut.
+7. **How the audio was cut up matters more than which model you pick.** WER
+   runs 2.5× higher on the shortest duration tercile than the middle one — a
+   7.6-point spread, against 1.5 points across all five system
+   configurations. At *matched* absolute duration AMI is no harder than
+   GigaSpeech, so most of "AMI is the hard corpus" is that AMI's utterances
+   are short. And 47–59% of the short-vs-long gap is pure composition: a short
+   utterance is mostly first-and-last words, which is exactly where
+   pre-segmented audio is cut.
 8. **Our own metadata failed its first validation.** The SNR estimators are
    biased by +0.8 to +12.1 dB against injected ground truth. Their *ranking*
    is sound (ρ 0.92–0.98), so tercile breakdowns are defensible and absolute
@@ -496,9 +496,10 @@ section honest:
 That table is also a bug report on my own design. The reliability gate was
 originally the *only* route into the breakdown, so a field without a second
 estimator could not be sliced on at all. Four exact fields sat computed and
-unused for that reason — including `duration_s`, which turns out to carry the
-largest effect in this entire section. A correctness check had quietly become
-an access-control check.
+unused for that reason — including `duration_s`, which turns out to be the
+largest effect of any field we *estimate or measure*, second only to the
+dataset label itself. A correctness check had quietly become an
+access-control check.
 
 ### Testing the metadata before trusting it
 
@@ -574,7 +575,47 @@ Parakeet is best on AMI and worst-but-one on GigaSpeech. A macro-average over
 datasets, which is what the board reports, erases this completely — and which
 corpus resembles your traffic is the only question a buyer actually has.
 
-### Duration is the largest effect here, and it is most of what "AMI is hard" means
+### How big is each effect
+
+Before the individual slices, the sizes, so that "X matters" is a measured
+claim rather than an impression. WER spread between a variable's best and
+worst bin, averaged over the four single-system configurations, pooled across
+datasets:
+
+| Conditioning variable | spread (WER pts) | ratio |
+|---|---|---|
+| dataset | **8.05** | 3.96 |
+| `duration_s` | 7.64 | 2.52 |
+| `disfluency_rate` | 7.51 | 2.26 |
+| `n_words` | 6.89 | 2.24 |
+| `numeric_rate` | 4.61 | 3.33 |
+| `speech_rate` | 4.19 | 1.92 |
+| `snr_db` | 1.70 | 1.30 |
+| `voiced_fraction` | 1.21 | 1.21 |
+| | | |
+| *all five system configurations* | *1.50* | *1.25* |
+| *choice of normalizer* | *1.92* | — |
+
+**Dataset is the largest single conditioning variable, and duration is
+second.** The two are not independent competitors, though — the next
+subsection is largely the argument that duration is a *mechanism* for the
+dataset effect rather than a rival to it.
+
+The robust comparison is the last two rows against the first eight. **Six of
+the eight conditioning variables move WER more than the entire spread across
+five system configurations, and five move it more than the choice of
+normalizer.** Which audio you feed a benchmark decides more than which
+recognizer you put behind it. Within AMI alone the length variables reach
+12–13 points of spread, eight times the model spread.
+
+Two cautions on reading that table. `disfluency_rate` and `numeric_rate` are
+confounded with dataset almost completely (see below), so their spreads are
+substantially the dataset effect reappearing. And `n_words` is the WER
+*denominator*, so part of its spread is mechanical rather than a difficulty
+finding — which is why the duration analysis leads and the word-count one
+corroborates.
+
+### Duration, and what "AMI is hard" actually means
 
 WER by duration tercile, pooled:
 
@@ -585,9 +626,10 @@ WER by duration tercile, pooled:
 | parakeet-tdt-0.6b-v2 | 11.51 | 4.87 | 5.33 |
 | Qwen3-ASR-1.7B | 11.38 | 4.62 | 5.57 |
 
-A factor of 2.5, which is larger than any model difference in this report and
-larger than the speech-rate and SNR effects combined. It is also not monotone:
-the middle tercile is the best, not the longest.
+A factor of 2.5, and a 7.6-point spread: five times the 1.5 points that
+separate all five system configurations, and more than the speech-rate and SNR
+effects combined (4.19 + 1.70). It is also not monotone — the middle tercile
+is the best, not the longest.
 
 It survives binning within AMI, where it is a factor of three (Parakeet
 18.32 → 9.08 → 5.93 at medians 1.4s / 3.0s / 5.7s). But the corpora barely

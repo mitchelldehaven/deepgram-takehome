@@ -22,8 +22,10 @@ Findings and limitations are in [REPORT.md](REPORT.md). This file is how to reru
 4. **Characterize the data.** Per-utterance metadata, used to slice every
    metric — pooled and within each dataset, because the fields are confounded
    with the corpus — and checked for reliability before it is used, with two
-   independent estimators per acoustic field. Includes a decomposition of why
-   short utterances score so much worse, which turns out to be half geometry.
+   independent estimators per acoustic field. Six of the eight conditioning
+   variables move WER more than the entire spread across the five system
+   configurations; a decomposition shows roughly half of the largest one is
+   geometry rather than difficulty.
 5. **Read the disagreements.** A diff tool that takes any two
    (system, normalizer) arms, decomposes the gap between them into exact
    per-utterance contributions, and prints the text behind the largest ones.
