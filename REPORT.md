@@ -64,11 +64,45 @@ Three datasets spanning the board's difficulty range: **AMI-Cleaned**
 **SPGISpeech** (earnings calls). 400 utterances each, 1200 total, 22,439
 reference words.
 
-The upstream parquets are **sorted by audio length, globally and descending**.
-Reading the first shard or the first N rows therefore returns only the longest
-utterances, and duration correlates with WER. The sampler instead takes shards
-at even intervals across the sorted order and samples rows within each, which
-spans the duration distribution by construction. Resulting spread:
+The brief asks for "a meaningful subset of its evaluation data", which can
+mean fewer datasets, fewer utterances within a dataset, or both. This is both,
+and the two decisions are justified differently: **which datasets** is a
+coverage argument, **how many utterances** is a statistical-power one.
+
+**Which datasets.** The board's nine columns are not reproducible in full —
+two are private, and two more are not in the aggregated repo (see the end of
+this section). Of what remains, three were chosen to span its difficulty
+range rather than to sample it randomly, so that the normalization and
+metadata findings have a hard case and an easy case to contrast. That is a
+deliberate trade: it maximises contrast and forfeits any claim to a
+board-representative average, which is why nothing here reports an "Average
+WER".
+
+**Which utterances.** The upstream parquets are **sorted by audio length,
+globally and descending**. Reading the first shard or the first N rows
+therefore returns only the longest utterances, and duration correlates with
+WER — by 7.6 points, as section 4 ends up measuring. The sampler instead takes
+shards at even intervals across the sorted order and samples rows uniformly
+within each, which spans the duration distribution by construction.
+
+For two of the three datasets that precaution turns out to be unnecessary in
+the best way: **there are fewer shards than we ask for, so every shard is
+read, and the sample is a plain uniform random sample of the entire test
+split.**
+
+| Dataset | shards read | rows sampled | split size | coverage |
+|---|---|---|---|---|
+| AMI-Cleaned | **3 of 3** | 400 | 7,805 | uniform random over the whole split |
+| GigaSpeech-Cleaned | **8 of 8** | 400 | 18,768 | uniform random over the whole split |
+| SPGISpeech | 8 of 38 | 400 | — | systematic over length-ordered shards |
+
+So on AMI and GigaSpeech there is no shard-selection question at all, and the
+sample is unbiased for *any* utterance property by construction — duration
+included. Only SPGISpeech relies on the systematic design, and it is the
+narrowest of the three in duration anyway (5.0–15.0 s). This matters again
+when explaining the reproduction gap below.
+
+Resulting spread:
 
 | Dataset | n | duration min/median/max | ref words |
 |---|---|---|---|
@@ -102,20 +136,38 @@ Leaderboard normalizer, as published:
 
 Bold = published value outside our 95% CI.
 
-**Why they differ.** In rough order of contribution:
+**Why they differ.** The gaps are **+0.58 on average and 8 of 9 are
+positive**, which is the useful clue, because the two candidate explanations
+predict different things. Sampling noise predicts random signs; a
+configuration difference predicts one direction. Under random signs, 8 of 9
+agreeing has p = 0.039.
 
-- **Subset, not the full split.** We score 400 of 7,805 (AMI) to ~39,300
-  (SPGI) utterances. This is the dominant term and it is symmetric noise —
-  but our CIs already account for it, and 7 of 9 published values land inside.
-- **Decoding configuration.** We run greedy, batch 32, fp16, `language="en"`
-  forced. The leaderboard's per-model scripts differ in batching and
-  precision, and batching changes padding, which changes Whisper output.
-- **Model version drift.** `nvidia/parakeet-tdt-0.6b-v2` is a moving
-  reference; we pin the leaderboard version (`20-11-2026`) but cannot pin
-  their inference commit.
-- **Our AMI result is *better* than published for Parakeet (−0.75).** A
-  one-directional bias with one exception is more consistent with sampling
-  plus config than with a systematic error in our pipeline.
+So the explanations separate:
+
+- **Sampling explains the spread, not the sign.** It is why individual cells
+  are off by ±1 rather than ±0.1, and our CIs account for exactly that — 7 of
+  9 published values land inside. But it cannot produce a one-directional
+  bias. This is firmer than it would normally be, because on AMI and
+  GigaSpeech *every shard was read* and the 400 rows are a uniform random
+  sample of the whole split, so the sample is unbiased for any utterance
+  property by construction. Those two datasets also carry the *larger* mean
+  gap (+0.70, against +0.35 for the one dataset where sampling could bias
+  anything). Sampling is not what is going on.
+- **Decoding configuration is the likeliest cause of the sign.** We run
+  greedy, batch 32, fp16, `language="en"` forced. The leaderboard's per-model
+  scripts differ in batching and precision, and batching changes padding,
+  which changes Whisper's output. Our numbers being consistently slightly
+  worse is what an unoptimised-but-correct configuration looks like.
+- **Model version drift** contributes an unknown amount.
+  `nvidia/parakeet-tdt-0.6b-v2` is a moving reference; we pin the leaderboard
+  version (`20-11-2026`) but cannot pin their inference commit.
+- **The one exception points the same way.** Parakeet on AMI is *better* than
+  published (−0.75). A systematic error in our scoring or normalization would
+  not spare one cell; a per-model configuration difference would.
+
+What this does **not** support is the comfortable reading that the gap is just
+noise. It is small, but it is real and it has a direction, and chasing the
+per-model decoding scripts is the first thing I would do with more time.
 
 **The headline "Average WER" is not reproducible by anyone outside Hugging
 Face.** Two of its nine default columns are private datasets, and a third
