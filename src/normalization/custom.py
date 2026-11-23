@@ -17,6 +17,12 @@ FILLERS = {"um", "uh", "mm", "hmm", "mhm", "uhhuh", "erm", "er", "ah", "eh"}
 PUNCT = re.compile(r"[^\w\s']", flags=re.UNICODE)
 APOSTROPHES = re.compile(r"[‘’ʼ´`]")
 NUMBER = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
+# Digit runs carrying a spoken suffix. These must be handled before NUMBER,
+# which would otherwise eat the digits and strand the suffix on the end of the
+# spelled-out word: "22nd" -> "twenty twond", "1960s" -> "... sixtys".
+ORDINAL = re.compile(r"\b(\d+)(?:st|nd|rd|th)\b")
+DECADE = re.compile(r"\b(\d{4})s\b")
+CLOCK = re.compile(r"\b(\d{1,2}):([0-5]\d)\b")
 MAGNITUDE = r"(?:hundred|thousand|million|billion|trillion)"
 WHITESPACE = re.compile(r"\s+")
 
@@ -61,6 +67,24 @@ CONTRACTIONS = {
 CURRENCY = {"$": "dollars", "£": "pounds", "€": "euros"}
 
 
+def spell_out_ordinal(match):
+    return num2words(int(match.group(1)), to="ordinal")
+
+
+def spell_out_decade(match):
+    """"1960s" is spoken "nineteen sixties", not "one thousand nine hundred
+    and sixtys". num2words' year reading gives "nineteen sixty"; the plural is
+    ours."""
+    words = num2words(int(match.group(1)), to="year")
+    return words[:-1] + "ies" if words.endswith("y") else words + "s"
+
+
+def spell_out_clock(match):
+    """A colon is not spoken. "3:00" is "three", "3:30" is "three thirty"."""
+    hour, minute = match.group(1), match.group(2)
+    return hour if minute == "00" else f"{hour} {minute}"
+
+
 def spell_out(match):
     value = match.group(0).replace(",", "")
     try:
@@ -93,6 +117,17 @@ def normalize(text, rules):
     # no longer has a toggle. See REPORT.md for why it used to.
     text = text.replace("-", " ")
 
+    # Two more symbols that stand for spoken words, handled here for the same
+    # reason and unconditionally, because the alternative is not a defensible
+    # alternative reading -- it is silent information loss. PUNCT below would
+    # strip both, leaving a clock time's minutes as a stray number ("3:00" ->
+    # "three zero") and deleting a spoken "percent" outright. The percent case
+    # is worse than it looks: it loses the word asymmetrically, since a
+    # reference's "15%" would drop it while a system writing "fifteen percent"
+    # keeps it, charging an insertion for agreeing.
+    text = CLOCK.sub(spell_out_clock, text)
+    text = re.sub(r"\s?%", " percent", text)
+
     if rules.normalize_currency:
         for symbol, word in CURRENCY.items():
             # "$5 million" is read "five million dollars": the unit follows the
@@ -111,6 +146,8 @@ def normalize(text, rules):
         text = " ".join(english_spelling_normalizer.get(w, w) for w in text.split())
 
     if rules.spell_out_numbers:
+        text = ORDINAL.sub(spell_out_ordinal, text)
+        text = DECADE.sub(spell_out_decade, text)
         text = NUMBER.sub(spell_out, text)
         # num2words emits "one thousand, two hundred" and "twenty-five". Both
         # separators become spaces, exactly as a hyphen in the source text

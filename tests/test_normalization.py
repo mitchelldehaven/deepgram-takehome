@@ -66,3 +66,30 @@ def test_normalizer_is_idempotent_on_its_own_output():
     for text in ["$5 million in 1,200 re-run orders", "um, we'll re-open it"]:
         once = norm(text)
         assert norm(once) == once
+
+
+def test_suffixed_digit_runs_do_not_strand_their_suffix():
+    """"22nd" became "twenty twond" and "1960s" became "... sixtys": the bare
+    number pattern ate the digits and left the suffix glued to the result.
+    Zero references contain an ordinal, but 60 hypotheses do, so the spurious
+    errors landed on the systems only."""
+    assert norm("the 22nd of may") == "the twenty second of may"
+    assert norm("the 1st and 3rd") == "the first and third"
+    assert norm("back in the 1960s") == "back in the nineteen sixties"
+    assert norm("the 1900s") == "the nineteen hundreds"
+
+
+def test_spoken_symbols_survive_to_words():
+    """A clock colon and a percent sign stand for spoken words. Stripping them
+    as punctuation left "3:00" as "three zero" and deleted "percent" outright.
+    """
+    assert norm("the 3:00 meeting") == "the three meeting"
+    assert norm("the 3:30 meeting") == "the three thirty meeting"
+    assert norm("up 15%") == "up fifteen percent"
+
+
+def test_percent_is_symmetric_between_digits_and_words():
+    """The asymmetry was the real cost: a reference's "15%" lost its "percent"
+    while a system writing it out kept the word, so agreeing scored an
+    insertion."""
+    assert norm("up 15%") == norm("up fifteen percent")
