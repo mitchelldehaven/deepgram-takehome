@@ -40,10 +40,10 @@ comes from `outputs/scores/`, and every run stamps its git hash into `logs/`.
    Nova-3's edge deletions on AMI drop by a third when the audio is padded
    with silence, which adds no information and so cannot be a recognition
    gain. That closes 44% of its gap to Parakeet.
-7. **How the audio was cut up matters more than which model you pick.** WER
-   runs 2.5× higher on the shortest duration tercile than the middle one — a
-   7.6-point spread, against 1.5 points across all five system
-   configurations. At *matched* absolute duration AMI is no harder than
+7. **How the audio was cut up matters more than which model you pick.** Short
+   clips score about 2.5 times worse than medium-length ones — 7.6 WER points
+   of difference, where the gap between the best and worst system here is 1.5
+   points. At *matched* absolute duration AMI is no harder than
    GigaSpeech, so most of "AMI is the hard corpus" is that AMI's utterances
    are short. And 47–59% of the short-vs-long gap is pure composition: a short
    utterance is mostly first-and-last words, which is exactly where
@@ -577,43 +577,49 @@ corpus resembles your traffic is the only question a buyer actually has.
 
 ### How big is each effect
 
-Before the individual slices, the sizes, so that "X matters" is a measured
-claim rather than an impression. WER spread between a variable's best and
-worst bin, averaged over the four single-system configurations, pooled across
-datasets:
+Before the individual slices, how much each clip property actually moves WER —
+so that "X matters" is a measured claim rather than an impression.
 
-| Conditioning variable | spread (WER pts) | ratio |
-|---|---|---|
-| dataset | **8.05** | 3.96 |
-| `duration_s` | 7.64 | 2.52 |
-| `disfluency_rate` | 7.51 | 2.26 |
-| `n_words` | 6.89 | 2.24 |
-| `numeric_rate` | 4.61 | 3.33 |
-| `speech_rate` | 4.19 | 1.92 |
-| `snr_db` | 1.70 | 1.30 |
-| `voiced_fraction` | 1.21 | 1.21 |
-| | | |
-| *all five system configurations* | *1.50* | *1.25* |
-| *choice of normalizer* | *1.92* | — |
+**How to read this.** Sort the 1,200 clips into three groups by one property
+(short / medium / long, say). Score each group separately. The number below is
+the WER difference between the best group and the worst, averaged over the
+four single-system configurations. Nova-3 scores 4.6 on medium-length clips
+and 12.6 on short ones, so clip length is worth about 8 WER points on Nova-3,
+and 7.6 averaged over systems. Everything is in WER points, the same unit as
+every other number in this report.
 
-**Dataset is the largest single conditioning variable, and duration is
-second.** The two are not independent competitors, though — the next
-subsection is largely the argument that duration is a *mechanism* for the
-dataset effect rather than a rival to it.
+| Property of a clip | worth (WER points) |
+|---|---|
+| how long it is | **7.6** |
+| how many "um"s it has | 7.5 |
+| how many words it has | 6.9 |
+| whether it contains numbers | 4.6 |
+| how fast the person talks | 4.2 |
+| how noisy it is | 1.7 |
+| how much of it is speech vs silence | 1.2 |
+| | |
+| *for comparison: all five system configurations* | *1.5* |
+| *for comparison: choice of normalizer* | *1.9* |
 
-The robust comparison is the last two rows against the first eight. **Six of
-the eight conditioning variables move WER more than the entire spread across
-five system configurations, and five move it more than the choice of
-normalizer.** Which audio you feed a benchmark decides more than which
-recognizer you put behind it. Within AMI alone the length variables reach
-12–13 points of spread, eight times the model spread.
+**Five of the seven clip properties move WER more than the entire difference
+between the best and worst system here.** That is the finding. A leaderboard
+reports the 1.5 and says nothing about the 7.6, so its headline number is
+mostly a statement about the audio it chose rather than about the recognizers
+it ranks. Within AMI alone, clip length is worth 12 points — eight times the
+model spread.
 
-Two cautions on reading that table. `disfluency_rate` and `numeric_rate` are
-confounded with dataset almost completely (see below), so their spreads are
-substantially the dataset effect reappearing. And `n_words` is the WER
-*denominator*, so part of its spread is mechanical rather than a difficulty
-finding — which is why the duration analysis leads and the word-count one
-corroborates.
+The dataset label is deliberately **not** in that table. It would top it at
+8.1 points, but it is not a property of a clip: it is the name of the whole
+bundle of properties, so it cannot compete with its own contents. The rows
+above are an attempt to explain the dataset effect, not rivals to it, and the
+next subsection argues that clip length is most of it.
+
+Two cautions. "How many 'um's" and "whether it contains numbers" are almost
+entirely confounded with dataset (shown further down), so their numbers are
+largely the dataset effect reappearing under another name. And "how many
+words" is the WER *denominator* — part of its 6.9 is arithmetic rather than
+difficulty — which is why the duration analysis leads below and the word-count
+one only corroborates it.
 
 ### Duration, and what "AMI is hard" actually means
 
@@ -626,10 +632,10 @@ WER by duration tercile, pooled:
 | parakeet-tdt-0.6b-v2 | 11.51 | 4.87 | 5.33 |
 | Qwen3-ASR-1.7B | 11.38 | 4.62 | 5.57 |
 
-A factor of 2.5, and a 7.6-point spread: five times the 1.5 points that
-separate all five system configurations, and more than the speech-rate and SNR
-effects combined (4.19 + 1.70). It is also not monotone — the middle tercile
-is the best, not the longest.
+Short clips score about 2.5 times worse than medium ones: 7.6 WER points of
+difference, against the 1.5 points that separate all five system
+configurations, and more than clip noise and speaking rate put together. Note
+it is not a straight line — the *middle* group scores best, not the longest.
 
 It survives binning within AMI, where it is a factor of three (Parakeet
 18.32 → 9.08 → 5.93 at medians 1.4s / 3.0s / 5.7s). But the corpora barely
