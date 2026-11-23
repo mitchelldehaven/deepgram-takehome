@@ -245,6 +245,36 @@ METRICS = {
 }
 
 
+# How many resampled draws to hold in memory at once. A single (samples, n)
+# index array is samples * n * 8 bytes -- about a gigabyte on a full test
+# split, with two more of that size alive during the gather. Generating the
+# draws in blocks bounds peak memory and consumes the random stream in exactly
+# the same order, so the numbers are unchanged.
+BOOTSTRAP_BLOCK = 250
+
+
+def _resampled_sums(pair_arrays, samples, rng):
+    """Bootstrap sums of each (numerator, denominator) array, block by block.
+
+    Every array in `pair_arrays` is resampled with the *same* indices, which is
+    what makes the paired test paired.
+    """
+    n = len(pair_arrays[0])
+    out = [[[], []] for _ in pair_arrays]
+    drawn = 0
+    while drawn < samples:
+        block = min(BOOTSTRAP_BLOCK, samples - drawn)
+        idx = rng.integers(0, n, size=(block, n))
+        for pairs, sums in zip(pair_arrays, out):
+            sums[0].append(pairs[:, 0][idx].sum(axis=1))
+            sums[1].append(pairs[:, 1][idx].sum(axis=1))
+        drawn += block
+    return [
+        (np.concatenate(numerators), np.concatenate(denominators))
+        for numerators, denominators in out
+    ]
+
+
 def bootstrap_ci(pairs, samples, confidence, seed):
     """Percentile bootstrap over utterances.
 
@@ -255,9 +285,7 @@ def bootstrap_ci(pairs, samples, confidence, seed):
     n = len(pairs)
     if n == 0:
         return float("nan"), float("nan"), float("nan")
-    idx = rng.integers(0, n, size=(samples, n))
-    errors = pairs[:, 0][idx].sum(axis=1)
-    lengths = pairs[:, 1][idx].sum(axis=1)
+    (errors, lengths), = _resampled_sums([pairs], samples, rng)
     with np.errstate(divide="ignore", invalid="ignore"):
         draws = np.where(lengths > 0, errors / lengths, np.nan)
     alpha = (1.0 - confidence) / 2.0
@@ -274,10 +302,7 @@ def paired_bootstrap(pairs_a, pairs_b, samples, confidence, seed):
     by eye and which overstates how uncertain the ranking is.
     """
     rng = np.random.default_rng(seed)
-    n = len(pairs_a)
-    idx = rng.integers(0, n, size=(samples, n))
-    ea, la = pairs_a[:, 0][idx].sum(axis=1), pairs_a[:, 1][idx].sum(axis=1)
-    eb, lb = pairs_b[:, 0][idx].sum(axis=1), pairs_b[:, 1][idx].sum(axis=1)
+    (ea, la), (eb, lb) = _resampled_sums([pairs_a, pairs_b], samples, rng)
     with np.errstate(divide="ignore", invalid="ignore"):
         draws = np.where(la > 0, ea / la, np.nan) - np.where(lb > 0, eb / lb, np.nan)
     alpha = (1.0 - confidence) / 2.0
