@@ -13,4 +13,9 @@ keep_apostrophes: true        # DIFFERS: leaderboard strips them ("don t")
 british_to_american: false    # DIFFERS: leaderboard maps colour -> color
 spell_out_numbers: true       # DIFFERS: leaderboard canonicalises to digits
 normalize_currency: true      # "$5" -> "5 dollars" before spelling out
-collapse_hyphenation: true    # "re-run" -> "rerun"
+
+# Hyphenation is deliberately NOT a toggle. Both normalizers treat a hyphen as
+# a word boundary, so there is nothing here to disagree about; an earlier
+# version collapsed them instead, and src/eval/compare.py showed what that
+# cost. REPORT.md keeps the episode because the rule was wrong in a way that
+# reading it did not reveal.

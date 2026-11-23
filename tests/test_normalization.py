@@ -27,15 +27,23 @@ def test_currency_unit_follows_magnitude():
     assert norm("£3 billion") == "three billion pounds"
 
 
-@pytest.mark.parametrize("collapse", [True, False])
-def test_digits_and_words_tokenize_identically(collapse):
+def test_digits_and_words_tokenize_identically():
     """The point of canonicalizing numbers is that the same quantity scores the
     same whichever way the source wrote it. Spelling out used to run *after*
     hyphen collapsing, so "twenty-five" gave one token and "25" gave two.
     """
-    words = norm("twenty-five orders", collapse_hyphenation=collapse)
-    digits = norm("25 orders", collapse_hyphenation=collapse)
-    assert words == digits
+    assert norm("twenty-five orders") == norm("25 orders") == "twenty five orders"
+
+
+def test_hyphens_are_word_boundaries():
+    """A hyphen separates words that are spoken separately, so it becomes a
+    space. Collapsing it instead produced tokens no recognizer emits -- see
+    REPORT.md; the diff tool found this, reading the rule did not."""
+    assert norm("re-run") == "re run"
+    assert norm("a forty-two-year-old") == "a forty two year old"
+    assert norm("self-control") == "self control"
+    # And the same for hyphens num2words introduces, not just source ones.
+    assert norm("42-year-old") == "forty two year old"
 
 
 def test_toggles_are_honoured():
@@ -46,9 +54,10 @@ def test_toggles_are_honoured():
     assert norm("i don't know", expand_contractions=True) == "i do not know"
     assert norm("i don't know", keep_apostrophes=False) == "i dont know"
     assert norm("the colour", british_to_american=True) == "the color"
-    assert norm("re-run", collapse_hyphenation=True) == "rerun"
-    assert norm("re-run", collapse_hyphenation=False) == "re run"
     assert norm("[laughter] hello", strip_non_speech=True) == "hello"
+    # Hyphen splitting happens before the per-token rules, so a hyphenated
+    # British spelling is still mapped.
+    assert norm("colour-coded", british_to_american=True) == "color coded"
 
 
 def test_normalizer_is_idempotent_on_its_own_output():

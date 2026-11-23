@@ -80,6 +80,19 @@ def normalize(text, rules):
     text = APOSTROPHES.sub("'", text)
     text = text.lower()
 
+    # A hyphen is a word boundary, so it becomes a space rather than being
+    # closed up. "forty-two-year-old" is spoken as four words and every
+    # recognizer emits it as four; collapsing it to one token would charge
+    # four errors for a difference in orthography that nobody uttered.
+    # Done here, before the rules below, so that per-token rules such as
+    # british_to_american see "colour coded" rather than one unknown token.
+    #
+    # This is also what the leaderboard's normalizer does (a hyphen is
+    # unicode category Pd, which its remove_symbols_and_diacritics maps to a
+    # space), so hyphenation is no longer one of our disagreements with it and
+    # no longer has a toggle. See REPORT.md for why it used to.
+    text = text.replace("-", " ")
+
     if rules.normalize_currency:
         for symbol, word in CURRENCY.items():
             # "$5 million" is read "five million dollars": the unit follows the
@@ -99,13 +112,11 @@ def normalize(text, rules):
 
     if rules.spell_out_numbers:
         text = NUMBER.sub(spell_out, text)
-        # num2words emits "one thousand, two hundred"; the hyphens it also
-        # emits are left for the hyphenation rule below to treat exactly as it
-        # treats hyphens that were in the source text.
-        text = text.replace(",", " ")
-
-    if rules.collapse_hyphenation:
-        text = re.sub(r"(\w)-(\w)", r"\1\2", text)
+        # num2words emits "one thousand, two hundred" and "twenty-five". Both
+        # separators become spaces, exactly as a hyphen in the source text
+        # does above -- otherwise "25" and "twenty-five" would tokenize
+        # differently and canonicalizing numbers would accomplish nothing.
+        text = text.replace(",", " ").replace("-", " ")
 
     text = PUNCT.sub(" ", text)
 
