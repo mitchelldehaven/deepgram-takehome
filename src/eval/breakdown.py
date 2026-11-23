@@ -61,6 +61,39 @@ MIN_BIN_AGREEMENT = 0.6
 N_BINS = 3
 BIN_LABELS = ["low", "mid", "high"]
 
+# Below this many utterances a bin is not reported at all.
+MIN_BIN_SIZE = 10
+
+
+def bin_values(values):
+    """Three bins, chosen to suit the field's distribution.
+
+    Terciles are the default, but they are the wrong tool for a zero-inflated
+    field: `disfluency_rate` is exactly zero on 86% of utterances and
+    `numeric_rate` on 96%, so both their 33rd and 67th percentiles are zero
+    and all the structure collapses into one bin. There the informative split
+    is none-vs-some: utterances at exactly zero form a bin of their own, and
+    the rest are halved at their median.
+
+    Returns (bins, labels). The `bin` names differ between the two schemes on
+    purpose, so a reader cannot mistake "none" for "low".
+    """
+    finite = np.isfinite(values)
+    zero_inflated = finite.sum() and (values[finite] == 0).mean() > 1 / N_BINS
+    if not zero_inflated:
+        return tertiles(values), BIN_LABELS
+
+    out = np.full(len(values), "n/a", dtype=object)
+    out[finite & (values == 0)] = "none"
+    nonzero = finite & (values > 0)
+    if nonzero.sum() < 2 * MIN_BIN_SIZE:
+        out[nonzero] = "some"
+        return out, ["none", "some"]
+    split = np.median(values[nonzero])
+    out[nonzero & (values <= split)] = "low"
+    out[nonzero & (values > split)] = "high"
+    return out, ["none", "low", "high"]
+
 
 def tertiles(values):
     """Bin into terciles, per dataset-free global quantiles."""
@@ -151,10 +184,10 @@ def breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability)
                 values = np.array(
                     [by_id[row["id"]][source] for row in kept], dtype=float
                 )
-                bins = tertiles(values)
-                for label in BIN_LABELS:
+                bins, labels = bin_values(values)
+                for label in labels:
                     mask = bins == label
-                    if mask.sum() < 10:
+                    if mask.sum() < MIN_BIN_SIZE:
                         continue
                     point, lower, upper = bootstrap_ci(
                         pairs[mask],
