@@ -27,11 +27,32 @@ from src.paths import CONFIG_DIR, METADATA_FILE, SCORES_DIR, SUBSET_FILE
 
 DEFAULT_CONFIG = CONFIG_DIR / "eval" / "openasr.yaml"
 
-# Fields computed two independent ways in src/data/metadata.py.
+# Acoustic properties we *estimate*. Each is computed two independent ways in
+# src/data/metadata.py so the estimate can be checked before it is used.
 ESTIMATOR_PAIRS = {
     "snr_db": ("snr_percentile_db", "snr_wada_db"),
     "speech_rate": ("speech_rate_wall", "speech_rate_voiced"),
 }
+
+# Properties we *measure*. A duration is a sample count over a sample rate and
+# a word count is a word count: there is no estimator to disagree with, so the
+# two-estimator check neither applies nor is needed, and these are exact.
+# Keeping the distinction explicit matters, because the reliability gate was
+# originally the only route into the breakdown table -- which silently meant
+# that a field without a second estimator could not be sliced on at all, and
+# the most obvious conditioning variable on a short-form benchmark (how long
+# the utterance is) went unexamined for that reason alone.
+MEASURED_FIELDS = {
+    "duration_s": "utterance duration in seconds",
+    "n_words": "reference length in words",
+    "disfluency_rate": "fraction of reference words that are fillers",
+    "numeric_rate": "fraction of reference tokens containing a digit",
+}
+
+# Estimated, but with only one estimator, so it cannot be checked the way the
+# two above are. Sliced on and reported, flagged unreliable -- the project's
+# rule is to report a field as unchecked rather than to use it quietly.
+UNCHECKED_FIELDS = {"voiced_fraction": "fraction of frames above the energy floor"}
 
 # Agreement below this and we do not trust the field enough to slice on it.
 MIN_SPEARMAN = 0.7
@@ -100,6 +121,22 @@ def check_reliability(metadata):
     return pd.DataFrame(rows)
 
 
+def slice_fields(reliability):
+    """Every field we slice on, as (name, metadata key, is_reliable).
+
+    Three kinds, and the difference is the point: an estimated field carries
+    the verdict of its two-estimator check, a measured field is exact and
+    needs none, and a single-estimator field is reported as unchecked.
+    """
+    for field, (first, _) in ESTIMATOR_PAIRS.items():
+        verdict = reliability.loc[reliability.field == field, "reliable"]
+        yield field, first, bool(verdict.iloc[0]) if len(verdict) else False
+    for field in MEASURED_FIELDS:
+        yield field, field, True
+    for field in UNCHECKED_FIELDS:
+        yield field, field, False
+
+
 def breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability):
     by_id = {row["id"]: row for row in metadata}
     rows = []
@@ -110,12 +147,9 @@ def breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability)
         for metric, function in METRICS.items():
             pairs = function(references, hyps, **metric_kwargs(cfg, metric))
 
-            for field, (first, _) in ESTIMATOR_PAIRS.items():
-                is_reliable = bool(
-                    reliability.loc[reliability.field == field, "reliable"].iloc[0]
-                )
+            for field, source, is_reliable in slice_fields(reliability):
                 values = np.array(
-                    [by_id[row["id"]][first] for row in kept], dtype=float
+                    [by_id[row["id"]][source] for row in kept], dtype=float
                 )
                 bins = tertiles(values)
                 for label in BIN_LABELS:
