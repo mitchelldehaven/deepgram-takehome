@@ -1,0 +1,83 @@
+# Full test splits, for measuring what the 1200-utterance subset cost us.
+#
+# Run with RUN_TAG set, so this does not overwrite the subset run that
+# REPORT.md is written from:
+#
+#   export PYTHONPATH=. RUN_TAG=full
+#   .venv/bin/python src/data/build_subset.py  --config config/eval/full.yaml
+#   .venv/bin/python src/eval/transcribe.py    --config config/eval/full.yaml
+#   .venv/bin/python src/eval/score.py         --config config/eval/full.yaml
+#   .venv/bin/python src/eval/subset_validation.py
+#
+# ~65,900 utterances, ~144 h of audio, ~16 GB of wavs on disk.
+#
+# The point is to answer two questions that the subset can only argue about:
+#   1. Does the full-split WER fall inside the confidence interval the 400-row
+#      sample predicted? That is a direct calibration check on the central
+#      methodological claim of section 1.
+#   2. With sampling removed entirely, how much of the +0.58 reproduction gap
+#      is left? Whatever remains cannot be the subset.
+leaderboard:
+  version_id: "20-11-2026"
+  rtfx_column: "RTFx ⬆️️"
+  published_columns:
+    - AMI-Cleaned
+    - Earnings22-Cleaned-AA-chunked
+    - Gigaspeech-Cleaned
+    - SPGISpeech
+    - URGENT24
+    - Voice Arena Monsoon
+    - Voxpopuli-AA-Cleaned
+
+subset:
+  dataset_path: hf-audio/open-asr-leaderboard
+  split: test
+  datasets:
+    - name: AMI-Cleaned
+      config: ami_cleaned
+    - name: Gigaspeech-Cleaned
+      config: gigaspeech_cleaned
+    - name: SPGISpeech
+      config: spgispeech
+  utterances_per_dataset: null   # null = every row
+  shards_per_dataset: null       # null = every shard
+  seed: 42
+
+# Open models only. Deepgram is excluded deliberately: 144 h of audio through
+# a paid API is not a sensible way to answer a sampling question, and the
+# systems whose published numbers we are checking are the open ones anyway.
+#
+# Batch sizes are IDENTICAL to config/eval/openasr.yaml, which matters more
+# than it looks. Batching changes padding and padding changes Whisper's
+# output -- this report says so in section 1. Raising the batch sizes to suit
+# a 96 GB GPU would confound "full split vs subset" with "different decoding
+# configuration", and the whole purpose of the run is to isolate the first.
+systems:
+  - name: whisper_large_v3
+    backend: whisper
+    model: openai/whisper-large-v3
+    leaderboard_id: openai/whisper-large-v3
+    batch_size: 32
+  - name: qwen3_asr_1_7b
+    backend: qwen3_asr
+    model: Qwen/Qwen3-ASR-1.7B-hf
+    leaderboard_id: Qwen/Qwen3-ASR-1.7B-hf
+    batch_size: 16
+  - name: parakeet_tdt_0_6b_v2
+    backend: parakeet
+    model: nvidia/parakeet-tdt-0.6b-v2
+    leaderboard_id: nvidia/parakeet-tdt-0.6b-v2
+    batch_size: 16
+    venv: .venv-nemo
+
+normalization:
+  - leaderboard
+  - custom
+
+scoring:
+  bootstrap_samples: 2000
+  confidence: 0.95
+  seed: 42
+  catastrophic_threshold: 0.5
+  hallucination_ratio: 1.2
+  edge_words: 2
