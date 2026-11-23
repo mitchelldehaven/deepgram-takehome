@@ -86,3 +86,16 @@ scoring:
   catastrophic_threshold: 0.5   # per-utterance WER above this is unusable
   hallucination_ratio: 1.2      # hypothesis >= 1.2x reference length is invention
   edge_words: 2                 # first and last N reference words are the "edges"
+
+# src/eval/compare.py: an investigation tool, not part of the default run. It
+# diffs two (system, normalizer) arms on the same utterances and ranks them by
+# how much each one moves the gap. Everything here is meant to be overridden
+# on the command line; the defaults just make a bare run do something useful.
+compare:
+  a: deepgram_nova_3_raw:leaderboard
+  b: deepgram_nova_3_raw:custom
+  metric: wer                   # any key of src.eval.metrics.METRICS
+  dataset: null                 # restrict to one dataset, or null for all
+  top: 15                       # utterances to print; the CSV has all of them
+  a_rules: null                 # custom-normalizer rule overrides for arm A
+  b_rules: null                 # ... and for arm B

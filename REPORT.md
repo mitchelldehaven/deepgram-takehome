@@ -180,6 +180,24 @@ is not neutral between systems — it rewards models that don't emit fillers and
 costs nothing to models that do. On spontaneous speech that is a meaningful
 thumb on the scale, and it is invisible in the published number.
 
+A number in that table says a rule matters but not why, so
+`src/eval/compare.py` re-scores with one rule flipped and prints the
+utterances that moved. On `collapse_hyphenation` (0.93 WER on Nova-3 alone)
+the mechanism is immediate and is an argument against our own rule:
+
+```
+ref   ... as a fortytwoyearold that i have one more year to get all my selfcontrol together
+A     ... as a [+forty] [+two] [+year] {fortytwoyearold>old} ... all my [+self] {selfcontrol>control} together
+B     ... as a forty two year old that i have one more year to get all my self control together
+```
+
+Collapsing is right for `re-run` → `rerun` and wrong for `forty-two-year-old`,
+which it welds into a token no recognizer will ever emit — and then charges
+four errors for. The rule is reported as-is rather than quietly repaired,
+because the ablation's job is to price the choice, not to hide that one of
+ours is poorly specified. Fixing it would mean splitting the rule in two:
+collapse hyphens inside a word, space them between words.
+
 ### Output formatting is a measurement artifact
 
 Nova-3 twice, same model, same audio, differing only in API flags

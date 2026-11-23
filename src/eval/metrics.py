@@ -62,10 +62,6 @@ def wer_from_counts(pairs):
     return float(errors) / float(length) if length else float("nan")
 
 
-def wer(references, hypotheses):
-    return wer_from_counts(counts(references, hypotheses))
-
-
 def error_breakdown(references, hypotheses):
     """Substitutions / deletions / insertions as rates, for diagnosing a WER.
 
