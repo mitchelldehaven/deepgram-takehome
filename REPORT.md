@@ -22,9 +22,9 @@ comes from `outputs/scores/`, and every run stamps its git hash into `logs/`.
    is 0.28 and **unresolvable** (p=0.36). Same audio, same models, same
    metric — a conclusion that exists under one set of text conventions and
    not the other.
-3. **Output formatting is worth up to 1.6 WER on its own.** The *same*
+3. **Output formatting is worth up to 1.4 WER on its own.** The *same*
    Nova-3 model on the *same* audio scores 0.56 (leaderboard normalizer) to
-   1.62 (ours) worse purely by leaving the API's punctuation and numeral
+   1.36 (ours) worse purely by leaving the API's punctuation and numeral
    formatting on. Nothing about the recognition changed.
 4. **The top three are statistically indistinguishable.** Parakeet (6.04),
    Nova-3 raw (6.05) and Qwen3-ASR (6.08) are separated by 0.04 WER where the
@@ -151,11 +151,11 @@ not survive the diff tool*, below.)
 | | Leaderboard normalizer | | Our normalizer | |
 |---|---|---|---|---|
 | | WER | 95% CI | WER | 95% CI |
-| parakeet-tdt-0.6b-v2 | **6.04** | [5.49, 6.66] | **7.62** | [7.01, 8.30] |
-| deepgram-nova-3 (raw) | 6.05 | [5.46, 6.68] | 7.73 | [7.10, 8.39] |
-| Qwen3-ASR-1.7B | 6.08 | [5.54, 6.66] | 8.04 | [7.43, 8.71] |
-| deepgram-nova-3 (formatted) | 6.62 | [6.04, 7.26] | 9.35 | [8.63, 10.08] |
-| whisper-large-v3 | 7.54 | [6.91, 8.22] | 9.63 | [8.92, 10.40] |
+| parakeet-tdt-0.6b-v2 | **6.04** | [5.49, 6.66] | **7.56** | [6.96, 8.24] |
+| deepgram-nova-3 (raw) | 6.05 | [5.46, 6.68] | 7.70 | [7.07, 8.37] |
+| Qwen3-ASR-1.7B | 6.08 | [5.54, 6.66] | 8.02 | [7.41, 8.69] |
+| deepgram-nova-3 (formatted) | 6.62 | [6.04, 7.26] | 9.06 | [8.37, 9.79] |
+| whisper-large-v3 | 7.54 | [6.91, 8.22] | 9.58 | [8.87, 10.35] |
 
 **The orderings agree.** Every system sits at the same rank under both
 normalizers. An earlier version of this table had two rank flips, and they
@@ -169,7 +169,7 @@ load-bearing row is the last two:
 | Nova-3 (formatted) vs whisper-large-v3 | Δ WER | 95% CI | p |
 |---|---|---|---|
 | leaderboard normalizer | **−0.92** | [−1.36, −0.47] | <0.001 |
-| ours | −0.28 | [−0.93, +0.38] | 0.36 |
+| ours | −0.52 | [−1.14, +0.09] | 0.095 |
 
 Both normalizers put Nova-3 ahead. Only one of them entitles you to say so.
 A buyer reading "Nova-3 beats Whisper by 0.9 WER" is reading a fact about the
@@ -185,7 +185,7 @@ Mean |ΔWER| across systems from flipping one rule:
 | Rule | Δ WER | What it does |
 |---|---|---|
 | `remove_fillers` | 0.65 | deletes um/uh/mm before scoring |
-| `spell_out_numbers` | 0.42 | digits ↔ words |
+| `spell_out_numbers` | 0.49 | digits ↔ words |
 | `expand_contractions` | 0.17 | "don't" → "do not" |
 | `keep_apostrophes` | 0.07 | |
 | `british_to_american` | 0.04 | |
@@ -228,7 +228,8 @@ Three things followed, and the third is the one that matters:
 1. Every custom-normalizer WER fell by 1.6–2.1 points.
 2. `spell_out_numbers` rose from 0.27 to 0.42, because it had been partly
    masked: spelled-out numbers carry hyphens, so the collapse rule was
-   absorbing some of its effect.
+   absorbing some of its effect. Fixing the suffix bugs below took it to
+   0.49.
 3. **Both rank flips disappeared.** The earlier table had Qwen3 above Nova-3
    raw, and Whisper above Nova-3 formatted, under our normalizer only. Neither
    was a fact about normalization. Both were our own rule inflating WER
@@ -249,6 +250,59 @@ passing test, a config toggle and a number in an ablation table. It was the
 finding in the section rather than the biggest error in it. Nothing about
 reading the code revealed the problem. Printing one utterance did.
 
+### What the remaining differences are
+
+Our six disagreements, run on probe sentences rather than described from the
+config, because the previous two subsections are what happens when a
+normalizer is described rather than executed:
+
+| | leaderboard | ours |
+|---|---|---|
+| `um i uh think so hmm` | `i think so` | `um i uh think so hmm` |
+| `i don't know we'll see` | `i do not know we will see` | `i don't know we'll see` |
+| `that's the dog's bowl` | `that is the dog s bowl` | `that's the dog's bowl` |
+| `the colour of the centre` | `the color of the center` | `the colour of the centre` |
+| `twenty five and 1,200` | `25 and 1200` | `twenty five and one thousand two hundred` |
+| `it cost $5 million` | `it cost $5000000` | `it cost five million dollars` |
+| `a forty-two-year-old re-run` | `a 42 year old re run` | `a forty two year old re run` |
+| `[laughter] hello (inaudible)` | `hello` | `hello` |
+
+Six differences and one agreement. The directions are consistent: the
+leaderboard canonicalizes *away* from what was said (deleting disfluencies,
+expanding contractions, converting words to digits), and ours canonicalizes
+*toward* it. Neither is correct. They answer different questions — "did the
+system recover the content" versus "did the system transcribe the utterance"
+— and only the second is the one a caption or a medical note is graded on.
+
+Writing that table is also what surfaced the last two bugs in this report.
+Three of the probe rows came back wrong on our side, none of them in a rule
+we had chosen:
+
+- `the 22nd` → `the twenty twond`. The number pattern matched `22` and left
+  `nd` glued to the result. **Zero references contain an ordinal and 60
+  hypotheses do**, so every spurious error landed on the systems.
+- `the 1960s` → `... sixtys`, the same stranding one suffix over.
+- `the 3:00 meeting` → `the three zero meeting`, and `15%` → `fifteen`, the
+  percent sign stripped as punctuation. That one was asymmetric and therefore
+  worse than it looks: a reference's `15%` lost its "percent" while a system
+  writing `fifteen percent` kept the word, so **agreeing scored an
+  insertion**.
+
+Fixed, with tests. The effect is small on four systems (0.02–0.06 WER) and
+not small on the fifth: **Nova-3 formatted moved 0.29**, because `numerals`
+is exactly the flag that makes it emit the ordinals, digits and percent signs
+our normalizer was mishandling. The formatting penalty under our normalizer
+drops from 1.62 to 1.36 — so roughly a fifth of what section 2 was about to
+report as a formatting penalty was our own bug, charged to the one
+configuration whose output triggered it.
+
+One judgement call is left in place rather than fixed: a bare four-digit
+number is read as a quantity (`2019` → "two thousand and nineteen") rather
+than as a year ("twenty nineteen"), because nothing in the text distinguishes
+`2019` the year from `1200` the count. `num2words` will do either; choosing
+requires a guess, and a wrong guess here is the same class of silent error as
+the three above.
+
 ### Output formatting is a measurement artifact
 
 Nova-3 twice, same model, same audio, differing only in API flags
@@ -257,13 +311,13 @@ Nova-3 twice, same model, same audio, differing only in API flags
 | Normalizer | raw | formatted | Δ | p |
 |---|---|---|---|---|
 | leaderboard | 6.05 | 6.62 | **+0.56** | <0.001 |
-| ours | 7.73 | 9.35 | **+1.62** | <0.001 |
+| ours | 7.70 | 9.06 | **+1.36** | <0.001 |
 
 The open models the board ranks emit bare lowercase text; the normalizer grew
 up around that convention and handles it cleanly. A commercial API that
 returns production-ready formatted text is penalised for it. **Anyone
 benchmarking a formatting API against leaderboard numbers must turn formatting
-off first, or they will measure the wrong thing by up to 1.6 WER** — larger
+off first, or they will measure the wrong thing by up to 1.4 WER** — larger
 than the gap between ranks 17 and 53 on these datasets.
 
 ---
@@ -603,7 +657,11 @@ normalizer held three number-handling bugs, including
 one where the same quantity tokenized differently depending on whether the
 source wrote `twenty-five` or `25` — which defeats the entire purpose of
 canonicalizing numbers, and which moved the top rank under our own normalizer
-once fixed. And `collapse_hyphenation` welded `forty-two-year-old` into a
+once fixed. Writing out the normalizer-diff table for this report found two
+more of the same kind: a stranded ordinal suffix turning `22nd` into "twenty
+twond" on 60 hypotheses and none of the references, and a percent sign
+stripped asymmetrically so that agreeing with the reference scored an
+insertion. And `collapse_hyphenation` welded `forty-two-year-old` into a
 single token, inflating every custom-normalizer WER by about 1.8 points and
 manufacturing two rank flips that this report would otherwise have presented
 as its headline finding.
