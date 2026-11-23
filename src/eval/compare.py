@@ -38,7 +38,7 @@ the ablation table into the utterances behind it:
     python src/eval/compare.py \
         compare.a=deepgram_nova_3_raw:custom \
         compare.b=deepgram_nova_3_raw:custom \
-        compare.b_rules.collapse_hyphenation=false
+        compare.b_rules.remove_fillers=false
 """
 import re
 

@@ -13,7 +13,7 @@ Findings and limitations are in [REPORT.md](REPORT.md). This file is how to reru
    on a sample of three of its evaluation datasets, compared against the
    published numbers with bootstrap confidence intervals.
 2. **Test the normalization.** A second normalizer that disagrees with the
-   leaderboard's on seven specific, individually ablatable rules.
+   leaderboard's on six specific, individually ablatable rules.
 3. **Look past the metric.** Three metrics scored alongside WER --
    catastrophic failure rate, hallucination rate and edge error rate -- plus
    the substitution/deletion/insertion split behind each WER, and a probe
@@ -112,7 +112,7 @@ $P src/eval/compare.py \
 # one normalization rule, flipped: the utterances behind an ablation row
 $P src/eval/compare.py \
     compare.a=deepgram_nova_3_raw:custom compare.b=deepgram_nova_3_raw:custom \
-    compare.b_rules.collapse_hyphenation=false
+    compare.b_rules.remove_fillers=false
 ```
 
 It prints a headline (both values, the paired-bootstrap gap and whether the

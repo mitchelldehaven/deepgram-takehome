@@ -15,14 +15,16 @@ comes from `outputs/scores/`, and every run stamps its git hash into `logs/`.
    mean **+0.58** above published, and the published number falls inside our
    95% CI in **7 of 9**. The bias is one-directional, which points at
    configuration rather than noise.
-2. **Normalization decides the ranking.** Under the leaderboard's normalizer,
-   Deepgram Nova-3 with default formatting beats Whisper large-v3 by 0.92 WER
-   (p<0.001). Under a second defensible normalizer, that gap vanishes
-   (+0.11, p=0.78). Same audio, same models, same metric — different text
-   conventions.
-3. **Output formatting is worth up to 1.4 WER on its own.** The *same*
+2. **Normalization decides what you may conclude, not who is ahead.** Under
+   the leaderboard's normalizer, Deepgram Nova-3 with default formatting beats
+   Whisper large-v3 by 0.92 WER and the paired bootstrap calls it (p<0.001).
+   Under a second defensible normalizer the ordering is the same but the gap
+   is 0.28 and **unresolvable** (p=0.36). Same audio, same models, same
+   metric — a conclusion that exists under one set of text conventions and
+   not the other.
+3. **Output formatting is worth up to 1.6 WER on its own.** The *same*
    Nova-3 model on the *same* audio scores 0.56 (leaderboard normalizer) to
-   1.44 (ours) worse purely by leaving the API's punctuation and numeral
+   1.62 (ours) worse purely by leaving the API's punctuation and numeral
    formatting on. Nothing about the recognition changed.
 4. **The top three are statistically indistinguishable.** Parakeet (6.04),
    Nova-3 raw (6.05) and Qwen3-ASR (6.08) are separated by 0.04 WER where the
@@ -138,26 +140,43 @@ pinned commit `c469619`). It makes choices nobody publishes alongside the
 numbers: it deletes filler words, expands contractions, strips apostrophes,
 maps British to American spelling, and canonicalises number words to digits.
 
-Our alternative (`config/normalization/custom.yaml`) disagrees on seven
+Our alternative (`config/normalization/custom.yaml`) disagrees on six
 specific points, each independently togglable. These are not *better* choices
-— they are *defensible* ones, which is the whole point.
+— they are *defensible* ones, which is the whole point. (It disagreed on
+seven until one of them turned out to be indefensible; see *The rule that did
+not survive the diff tool*, below.)
 
 ### Ranking under each normalizer
 
 | | Leaderboard normalizer | | Our normalizer | |
 |---|---|---|---|---|
 | | WER | 95% CI | WER | 95% CI |
-| parakeet-tdt-0.6b-v2 | **6.04** | [5.49, 6.66] | **8.39** | [7.76, 9.11] |
-| deepgram-nova-3 (raw) | 6.05 | [5.46, 6.68] | 8.65 | [8.01, 9.36] |
-| Qwen3-ASR-1.7B | 6.08 | [5.54, 6.66] | 8.55 | [7.89, 9.23] |
-| deepgram-nova-3 (formatted) | 6.62 | [6.04, 7.26] | 10.10 | [9.38, 10.82] |
-| whisper-large-v3 | 7.54 | [6.91, 8.22] | 9.98 | [9.24, 10.80] |
+| parakeet-tdt-0.6b-v2 | **6.04** | [5.49, 6.66] | **7.62** | [7.01, 8.30] |
+| deepgram-nova-3 (raw) | 6.05 | [5.46, 6.68] | 7.73 | [7.10, 8.39] |
+| Qwen3-ASR-1.7B | 6.08 | [5.54, 6.66] | 8.04 | [7.43, 8.71] |
+| deepgram-nova-3 (formatted) | 6.62 | [6.04, 7.26] | 9.35 | [8.63, 10.08] |
+| whisper-large-v3 | 7.54 | [6.91, 8.22] | 9.63 | [8.92, 10.40] |
 
-The load-bearing row is the last two. Under the leaderboard's normalizer,
-Nova-3 with default formatting **beats** Whisper by 0.92 WER, and the paired
-bootstrap says that is real (p<0.001). Under ours, the gap is +0.11 and
-unresolvable (p=0.78). A buyer reading "Nova-3 beats Whisper" is reading a
-fact about the normalizer as much as about the models.
+**The orderings agree.** Every system sits at the same rank under both
+normalizers. An earlier version of this table had two rank flips, and they
+were an artifact of a bad rule of ours rather than a property of the
+normalizers — see below, because how that was found matters more than the
+flips did.
+
+What does not survive the change of normalizer is the *significance*. The
+load-bearing row is the last two:
+
+| Nova-3 (formatted) vs whisper-large-v3 | Δ WER | 95% CI | p |
+|---|---|---|---|
+| leaderboard normalizer | **−0.92** | [−1.36, −0.47] | <0.001 |
+| ours | −0.28 | [−0.93, +0.38] | 0.36 |
+
+Both normalizers put Nova-3 ahead. Only one of them entitles you to say so.
+A buyer reading "Nova-3 beats Whisper by 0.9 WER" is reading a fact about the
+normalizer as much as about the models: under text conventions that are no
+less defensible, the same 1,200 utterances cannot tell the two apart. The
+claim that moves is not the ranking, it is the confidence — which is the
+claim a procurement decision actually rests on.
 
 ### Which rule does the work
 
@@ -165,25 +184,26 @@ Mean |ΔWER| across systems from flipping one rule:
 
 | Rule | Δ WER | What it does |
 |---|---|---|
-| `collapse_hyphenation` | 0.66 | "double-click" → "doubleclick" |
-| `remove_fillers` | 0.63 | deletes um/uh/mm before scoring |
-| `expand_contractions` | 0.19 | "don't" → "do not" |
-| `spell_out_numbers` | 0.27 | digits ↔ words |
+| `remove_fillers` | 0.65 | deletes um/uh/mm before scoring |
+| `spell_out_numbers` | 0.42 | digits ↔ words |
+| `expand_contractions` | 0.17 | "don't" → "do not" |
 | `keep_apostrophes` | 0.07 | |
 | `british_to_american` | 0.04 | |
 | `normalize_currency` | 0.01 | near-no-op: no currency symbols in these refs |
 | `strip_non_speech` | 0.00 | these refs carry no `[laughter]` markers |
 
-Two rules account for most of it, and `remove_fillers` is the one to worry
-about: **deleting disfluencies before scoring is a 0.63 WER subsidy**, and it
+One rule dominates, and it is the one to worry about:
+**deleting disfluencies before scoring is a 0.65 WER subsidy**, and it
 is not neutral between systems — it rewards models that don't emit fillers and
 costs nothing to models that do. On spontaneous speech that is a meaningful
 thumb on the scale, and it is invisible in the published number.
 
-A number in that table says a rule matters but not why, so
+### The rule that did not survive the diff tool
+
+A number in the ablation table says a rule matters but not *why*, so
 `src/eval/compare.py` re-scores with one rule flipped and prints the
-utterances that moved. On `collapse_hyphenation` (0.93 WER on Nova-3 alone)
-the mechanism is immediate and is an argument against our own rule:
+utterances that moved. Run against `collapse_hyphenation` — then the largest
+line in the table, 0.93 WER on Nova-3 alone — the mechanism was immediate:
 
 ```
 ref   ... as a fortytwoyearold that i have one more year to get all my selfcontrol together
@@ -191,12 +211,43 @@ A     ... as a [+forty] [+two] [+year] {fortytwoyearold>old} ... all my [+self] 
 B     ... as a forty two year old that i have one more year to get all my self control together
 ```
 
-Collapsing is right for `re-run` → `rerun` and wrong for `forty-two-year-old`,
-which it welds into a token no recognizer will ever emit — and then charges
-four errors for. The rule is reported as-is rather than quietly repaired,
-because the ablation's job is to price the choice, not to hide that one of
-ours is poorly specified. Fixing it would mean splitting the rule in two:
-collapse hyphens inside a word, space them between words.
+The rule closed hyphens up: `re-run` → `rerun`, but also
+`forty-two-year-old` → `fortytwoyearold`. The second is a token no recognizer
+will ever emit, and the metric charged four errors for it. Nobody utters a
+hyphen; a speaker says four words and every system writes four.
+
+The fix is to treat a hyphen as the word boundary it is. That turned out to
+delete the rule rather than repair it, because **the leaderboard's normalizer
+already does exactly that** — a hyphen is Unicode category `Pd`, and its
+`remove_symbols_and_diacritics` maps every `P` character to a space. Once ours
+agreed, there was nothing left to disagree about, so the toggle is gone and
+the custom normalizer is down to six rules.
+
+Three things followed, and the third is the one that matters:
+
+1. Every custom-normalizer WER fell by 1.6–2.1 points.
+2. `spell_out_numbers` rose from 0.27 to 0.42, because it had been partly
+   masked: spelled-out numbers carry hyphens, so the collapse rule was
+   absorbing some of its effect.
+3. **Both rank flips disappeared.** The earlier table had Qwen3 above Nova-3
+   raw, and Whisper above Nova-3 formatted, under our normalizer only. Neither
+   was a fact about normalization. Both were our own rule inflating WER
+   unevenly — it punishes systems in proportion to how often their output
+   meets a hyphenated reference, which is a property of the reference text,
+   not of the recognizer.
+
+So the headline claim of this section got *weaker and truer at the same
+time*. "The ranking moves when the normalization changes" was the more
+dramatic finding and it was partly an artifact of a bug in the thing doing the
+measuring. What is left — the ordering holds, the significance does not — is a
+smaller claim that is actually load-bearing, and it is the one that survives
+scrutiny.
+
+The general lesson is the uncomfortable one. This rule had a docstring, a
+passing test, a config toggle and a number in an ablation table. It was the
+*largest* number in that table, which made it look like the most important
+finding in the section rather than the biggest error in it. Nothing about
+reading the code revealed the problem. Printing one utterance did.
 
 ### Output formatting is a measurement artifact
 
@@ -206,13 +257,13 @@ Nova-3 twice, same model, same audio, differing only in API flags
 | Normalizer | raw | formatted | Δ | p |
 |---|---|---|---|---|
 | leaderboard | 6.05 | 6.62 | **+0.56** | <0.001 |
-| ours | 8.65 | 10.10 | **+1.44** | <0.001 |
+| ours | 7.73 | 9.35 | **+1.62** | <0.001 |
 
 The open models the board ranks emit bare lowercase text; the normalizer grew
 up around that convention and handles it cleanly. A commercial API that
 returns production-ready formatted text is penalised for it. **Anyone
 benchmarking a formatting API against leaderboard numbers must turn formatting
-off first, or they will measure the wrong thing by up to 1.4 WER** — larger
+off first, or they will measure the wrong thing by up to 1.6 WER** — larger
 than the gap between ranks 17 and 53 on these datasets.
 
 ---
@@ -504,8 +555,9 @@ GPU-hours. To run it continuously:
 3. **Treat normalization as a tracked dimension, not a constant.** Every
    result should carry its normalizer hash. The scoring grid is already
    system × dataset × normalizer; a regression dashboard should show all
-   three, because a normalizer change can move a ranking as much as a model
-   change.
+   three, because a normalizer change can decide whether a model change is
+   reportable — here it is the difference between p<0.001 and p=0.36 on the
+   same 1,200 utterances.
 4. **Gate on CIs, not point estimates.** A nightly "model A beat model B"
    alert should fire on the paired bootstrap, not on the means. Most of the
    movement on a leaderboard this tight is noise.
@@ -539,7 +591,7 @@ metadata against injected ground truth rather than settle for two estimators
 agreeing; and every claim in this report about what is and isn't statistically
 supported.
 
-**Three times, the useful finding came from distrusting the AI-written code
+**Four times, the useful finding came from distrusting the AI-written code
 rather than reading it.** The WADA-SNR implementation looked plausible and was
 wrong — it saturated at the grid maximum for every utterance and produced a
 confident, entirely spurious "metadata is unreliable" finding. The keyword
@@ -551,11 +603,20 @@ normalizer held three number-handling bugs, including
 one where the same quantity tokenized differently depending on whether the
 source wrote `twenty-five` or `25` — which defeats the entire purpose of
 canonicalizing numbers, and which moved the top rank under our own normalizer
-once fixed.
+once fixed. And `collapse_hyphenation` welded `forty-two-year-old` into a
+single token, inflating every custom-normalizer WER by about 1.8 points and
+manufacturing two rank flips that this report would otherwise have presented
+as its headline finding.
+
+That last one is the sharpest version of the problem. It was not an obscure
+helper: it was the *largest number in the ablation table*, which is to say it
+looked like the most important result in the section rather than the biggest
+error in it. A bug that makes a finding look stronger is the one least likely
+to be investigated.
 
 Each was found the same way: by making the code emit output a human could
 eyeball, on inputs chosen to be awkward, and reading it. None was found by
-code review — all three passed a careful read. That is the main thing I'd
+code review — all four passed a careful read. That is the main thing I'd
 carry into doing this work at scale. Generated analysis code fails in ways
 that produce *publishable-looking numbers*, and the numbers are the artifact
 nobody checks, because checking them is the work the numbers were supposed to
