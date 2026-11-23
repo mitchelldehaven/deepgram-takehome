@@ -20,7 +20,7 @@ from scipy.stats import spearmanr
 
 from src.config import load_config, setup_logging
 from src.data.utils import load_jsonl
-from src.eval.metrics import METRICS, bootstrap_ci
+from src.eval.metrics import METRICS, bootstrap_ci, counts, edge_breakdown
 from src.eval.score import aligned, metric_kwargs, load_transcripts
 from src.normalization.factory import build_normalizer
 from src.paths import CONFIG_DIR, METADATA_FILE, SCORES_DIR, SUBSET_FILE
@@ -181,34 +181,51 @@ def breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability)
             pairs = function(references, hyps, **metric_kwargs(cfg, metric))
 
             for field, source, is_reliable in slice_fields(reliability):
-                values = np.array(
+                all_values = np.array(
                     [by_id[row["id"]][source] for row in kept], dtype=float
                 )
-                bins, labels = bin_values(values)
-                for label in labels:
-                    mask = bins == label
-                    if mask.sum() < MIN_BIN_SIZE:
-                        continue
-                    point, lower, upper = bootstrap_ci(
-                        pairs[mask],
-                        cfg.scoring.bootstrap_samples,
-                        cfg.scoring.confidence,
-                        cfg.scoring.seed,
-                    )
-                    rows.append(
-                        {
-                            "metric": metric,
-                            "system": system_name,
-                            "field": field,
-                            "bin": label,
-                            "n": int(mask.sum()),
-                            "median_value": float(np.nanmedian(values[mask])),
-                            "value": 100 * point,
-                            "ci_low": 100 * lower,
-                            "ci_high": 100 * upper,
-                            "field_reliable": is_reliable,
-                        }
-                    )
+                # Pooled *and* within each dataset. Pooling alone is
+                # misleading here, because these fields are not independent of
+                # the corpus: the shortest duration tercile is 70% AMI and 0%
+                # SPGISpeech, and both nonzero numeric_rate bins are 100%
+                # SPGISpeech. A pooled slice on those is a dataset slice
+                # wearing a different label, and the only way to tell is to
+                # bin inside each corpus and see whether the effect survives.
+                scopes = [("ALL", np.ones(len(all_values), dtype=bool))]
+                scopes += [
+                    (name, datasets == name) for name in dict.fromkeys(datasets)
+                ]
+                for scope, scope_mask in scopes:
+                    values = np.where(scope_mask, all_values, np.nan)
+                    bins, labels = bin_values(all_values[scope_mask])
+                    full = np.full(len(all_values), "n/a", dtype=object)
+                    full[scope_mask] = bins
+                    bins = full
+                    for label in labels:
+                        mask = (bins == label) & scope_mask
+                        if mask.sum() < MIN_BIN_SIZE:
+                            continue
+                        point, lower, upper = bootstrap_ci(
+                            pairs[mask],
+                            cfg.scoring.bootstrap_samples,
+                            cfg.scoring.confidence,
+                            cfg.scoring.seed,
+                        )
+                        rows.append(
+                            {
+                                "metric": metric,
+                                "system": system_name,
+                                "field": field,
+                                "dataset": scope,
+                                "bin": label,
+                                "n": int(mask.sum()),
+                                "median_value": float(np.nanmedian(values[mask])),
+                                "value": 100 * point,
+                                "ci_low": 100 * lower,
+                                "ci_high": 100 * upper,
+                                "field_reliable": is_reliable,
+                            }
+                        )
 
             # Dataset is a label we are given rather than one we estimate, so
             # it needs no reliability check and is always safe to slice on.
@@ -225,6 +242,7 @@ def breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability)
                         "metric": metric,
                         "system": system_name,
                         "field": "dataset",
+                        "dataset": dataset,
                         "bin": dataset,
                         "n": int(mask.sum()),
                         "median_value": float("nan"),
@@ -235,6 +253,88 @@ def breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability)
                     }
                 )
     return pd.DataFrame(rows)
+
+
+# Reference-length buckets for the decomposition below. Lower bound is
+# MIN_REF_WORDS, since shorter utterances have no edge/middle split.
+LENGTH_BUCKETS = [(6, 10), (10, 16), (16, 26), (26, 10_000)]
+
+
+def length_decomposition(subset, transcripts, normalizer):
+    """Why short utterances score so much worse, split into its two causes.
+
+    Short utterances score far worse than long ones, and that is the largest
+    single effect in the metadata. Two different things produce it and they
+    need separating:
+
+      1. Composition. The edge metric in src/eval/metrics.py counts errors in
+         the first and last two reference words. For a 6-word utterance that
+         is 4 of 6 word slots; for a 40-word one it is 4 of 40. A short
+         utterance is *mostly* edge, and edges run about twice the error rate
+         of middles at every length.
+      2. Difficulty. Short utterances are also harder word-for-word in the
+         middle, where composition cannot be the explanation.
+
+    So this reports the edge rate, the middle rate and the edge share per
+    bucket, plus a counterfactual: what the shortest bucket's WER would be if
+    it had the *edge share* of the longest one but kept its own edge and
+    middle rates. The difference between that and its real WER is the part of
+    the short-utterance penalty that is geometry rather than difficulty.
+    """
+    rows = []
+    for system_name, hypotheses in transcripts.items():
+        references, hyps, _ = aligned(subset, hypotheses, normalizer)
+        lengths = np.array([len(r.split()) for r in references])
+        pairs = counts(references, hyps)
+        for low, high in LENGTH_BUCKETS:
+            mask = (lengths >= low) & (lengths < high)
+            if mask.sum() < MIN_BIN_SIZE:
+                continue
+            kept_refs = [r for r, keep in zip(references, mask) if keep]
+            kept_hyps = [h for h, keep in zip(hyps, mask) if keep]
+            edge, middle, edge_slots, middle_slots = edge_breakdown(
+                kept_refs, kept_hyps
+            )
+            slots = edge_slots + middle_slots
+            rows.append(
+                {
+                    "system": system_name,
+                    "ref_words": f"{low}-{high - 1}" if high < 10_000 else f"{low}+",
+                    "n": int(mask.sum()),
+                    "edge_share": 100 * edge_slots / slots if slots else float("nan"),
+                    "wer": 100 * pairs[mask][:, 0].sum() / pairs[mask][:, 1].sum(),
+                    "edge_error": 100 * sum(edge.values()) / edge_slots
+                    if edge_slots
+                    else float("nan"),
+                    "middle_error": 100 * sum(middle.values()) / middle_slots
+                    if middle_slots
+                    else float("nan"),
+                }
+            )
+
+    table = pd.DataFrame(rows)
+    # The counterfactual, per system: shortest bucket's error rates, longest
+    # bucket's shape.
+    counterfactual = []
+    for system_name, group in table.groupby("system"):
+        short, long = group.iloc[0], group.iloc[-1]
+        share = long.edge_share / 100
+        implied = share * short.edge_error + (1 - share) * short.middle_error
+        counterfactual.append(
+            {
+                "system": system_name,
+                "short_bucket": short.ref_words,
+                "long_bucket": long.ref_words,
+                "short_wer": short.wer,
+                "long_wer": long.wer,
+                "short_wer_at_long_edge_share": implied,
+                "gap": short.wer - long.wer,
+                "gap_from_composition": short.wer - implied,
+                "share_of_gap_from_composition": 100 * (short.wer - implied)
+                / (short.wer - long.wer),
+            }
+        )
+    return table, pd.DataFrame(counterfactual)
 
 
 def main(cfg):
@@ -270,6 +370,24 @@ def main(cfg):
                     f"  {row.system:<26} {str(row['bin']):<18} n={row.n:<4} "
                     f"{row.value:5.2f} [{row.ci_low:.2f}, {row.ci_high:.2f}]"
                 )
+
+    lengths, counterfactual = length_decomposition(subset, transcripts, normalizer)
+    lengths.to_csv(SCORES_DIR / "length_decomposition.csv", index=False)
+    counterfactual.to_csv(SCORES_DIR / "length_counterfactual.csv", index=False)
+    logger.info("why short utterances score worse (leaderboard normalizer):")
+    for _, row in lengths.iterrows():
+        logger.info(
+            f"  {row.system:<26} {row.ref_words:>6} words  n={row.n:<4} "
+            f"edge_share={row.edge_share:5.1f}%  wer={row.wer:5.2f}  "
+            f"edge={row.edge_error:5.2f}  middle={row.middle_error:5.2f}"
+        )
+    logger.info("how much of the short-long gap is composition, not difficulty:")
+    for _, row in counterfactual.iterrows():
+        logger.info(
+            f"  {row.system:<26} gap {row.gap:5.2f} -> "
+            f"{row.gap_from_composition:5.2f} from edge share "
+            f"({row.share_of_gap_from_composition:4.0f}%)"
+        )
 
     logger.info(f"tables -> {SCORES_DIR}")
 
