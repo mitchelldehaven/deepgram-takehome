@@ -19,9 +19,11 @@ Findings and limitations are in [REPORT.md](REPORT.md). This file is how to reru
    the substitution/deletion/insertion split behind each WER, and a probe
    testing how much of one vendor's edge penalty is the benchmark's own
    segmentation.
-4. **Characterize the data.** Per-utterance metadata, used to slice the
-   results — and checked for reliability before it is used, with two
-   independent estimators per acoustic field.
+4. **Characterize the data.** Per-utterance metadata, used to slice every
+   metric — pooled and within each dataset, because the fields are confounded
+   with the corpus — and checked for reliability before it is used, with two
+   independent estimators per acoustic field. Includes a decomposition of why
+   short utterances score so much worse, which turns out to be half geometry.
 5. **Read the disagreements.** A diff tool that takes any two
    (system, normalizer) arms, decomposes the gap between them into exact
    per-utterance contributions, and prints the text behind the largest ones.
@@ -151,7 +153,7 @@ src/
     transcribe.py              run systems, cache raw hypotheses
     metrics.py                 the four metrics, bootstrap, paired tests
     score.py                   scoring, published comparison, rule ablation
-    breakdown.py               metadata reliability + slices
+    breakdown.py               metadata reliability, slices, length decomposition
     compare.py                 diff two arms, utterance by utterance
     padding_probe.py           is an edge penalty the model or the segmentation?
 scripts/run_parakeet.py        NeMo inference, runs inside .venv-nemo

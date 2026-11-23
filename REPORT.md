@@ -40,7 +40,15 @@ comes from `outputs/scores/`, and every run stamps its git hash into `logs/`.
    Nova-3's edge deletions on AMI drop by a third when the audio is padded
    with silence, which adds no information and so cannot be a recognition
    gain. That closes 44% of its gap to Parakeet.
-7. **Our own metadata failed its first validation.** The SNR estimators are
+7. **Utterance duration is the largest effect in the data, and about half of
+   it is the benchmark's segmentation.** WER runs 2.5× higher on the shortest
+   duration tercile than the middle one — bigger than any model difference
+   here. At *matched* absolute duration AMI is no harder than GigaSpeech, so
+   most of "AMI is the hard corpus" is that AMI's utterances are short. And
+   47–59% of the short-vs-long gap is pure composition: a short utterance is
+   mostly first-and-last words, which is exactly where pre-segmented audio is
+   cut.
+8. **Our own metadata failed its first validation.** The SNR estimators are
    biased by +0.8 to +12.1 dB against injected ground truth. Their *ranking*
    is sound (ρ 0.92–0.98), so tercile breakdowns are defensible and absolute
    dB values are not.
@@ -473,7 +481,24 @@ recognizer.**
 ## 4. Characterizing the data
 
 Per-utterance metadata in `src/data/metadata.py`: duration, two SNR estimates,
-two speech-rate estimates, voiced fraction, disfluency rate, numeric rate.
+two speech-rate estimates, voiced fraction, reference length, disfluency rate,
+numeric rate.
+
+The fields fall into three kinds, and keeping them apart is what makes the
+section honest:
+
+| Kind | Fields | Can it be checked? |
+|---|---|---|
+| **estimated**, two ways | `snr_db`, `speech_rate` | yes — two estimators, then against injected ground truth |
+| **measured** | `duration_s`, `n_words`, `disfluency_rate`, `numeric_rate` | no check needed: a sample count and a word count are exact |
+| **estimated**, one way | `voiced_fraction` | no — reported, flagged, not concluded from |
+
+That table is also a bug report on my own design. The reliability gate was
+originally the *only* route into the breakdown, so a field without a second
+estimator could not be sliced on at all. Four exact fields sat computed and
+unused for that reason — including `duration_s`, which turns out to carry the
+largest effect in this entire section. A correctness check had quietly become
+an access-control check.
 
 ### Testing the metadata before trusting it
 
@@ -512,6 +537,12 @@ a bug.
 
 ### Breakdowns
 
+Every slice below is computed pooled **and within each dataset**, because
+these fields are not independent of the corpus. The shortest duration tercile
+is 70% AMI and 0% SPGISpeech; both nonzero `numeric_rate` bins are 100%
+SPGISpeech. A pooled slice on those is a dataset slice wearing a different
+label, and binning inside each corpus is the only way to tell.
+
 WER by speech rate (tercile), leaderboard normalizer:
 
 | System | slow | mid | fast |
@@ -543,6 +574,110 @@ Parakeet is best on AMI and worst-but-one on GigaSpeech. A macro-average over
 datasets, which is what the board reports, erases this completely — and which
 corpus resembles your traffic is the only question a buyer actually has.
 
+### Duration is the largest effect here, and it is most of what "AMI is hard" means
+
+WER by duration tercile, pooled:
+
+| System | 2.2s | 6.1s | 10.5s |
+|---|---|---|---|
+| whisper-large-v3 | **15.23** | 6.82 | 6.00 |
+| deepgram-nova-3 (raw) | 12.58 | 4.64 | 5.22 |
+| parakeet-tdt-0.6b-v2 | 11.51 | 4.87 | 5.33 |
+| Qwen3-ASR-1.7B | 11.38 | 4.62 | 5.57 |
+
+A factor of 2.5, which is larger than any model difference in this report and
+larger than the speech-rate and SNR effects combined. It is also not monotone:
+the middle tercile is the best, not the longest.
+
+It survives binning within AMI, where it is a factor of three (Parakeet
+18.32 → 9.08 → 5.93 at medians 1.4s / 3.0s / 5.7s). But the corpora barely
+overlap in duration — AMI's *longest* tercile has a shorter median than
+SPGISpeech's *shortest* — so the right test is fixed absolute buckets:
+
+| Parakeet, WER | 0–2s | 2–4s | 4–8s | 8–16s |
+|---|---|---|---|---|
+| AMI | 18.24 | 9.78 | 5.74 | 5.27 |
+| GigaSpeech | 16.57 | 11.16 | 7.54 | 9.63 |
+| SPGISpeech | — | — | 1.93 | 2.52 |
+
+**At matched duration, AMI is not harder than GigaSpeech.** Pooled, Whisper
+scores 14.64 on AMI and 9.49 on GigaSpeech, and AMI's reputation as the hard
+corpus rests on numbers like that. But 130 of AMI's 400 utterances are under
+two seconds against 36 of GigaSpeech's, and at 2–8s AMI is the *easier* of the
+two. Far-field overlapping speech is real, and so is the fact that a large
+part of what the benchmark attributes to it is utterance length.
+
+SPGISpeech stays genuinely easier at matched duration (1.93 vs 5.74 at 4–8s),
+so this is not a claim that duration explains everything — it explains the
+AMI–GigaSpeech gap and none of the SPGISpeech one.
+
+### Half of the short-utterance penalty is geometry, not difficulty
+
+This is where section 3's edge metric and section 4's metadata turn out to be
+the same finding. The edge metric counts errors in the first and last two
+reference words. For a 6-word utterance that is 4 of 6 word slots; for a
+40-word one it is 4 of 40. A short utterance is *mostly edge*, and edges run
+roughly twice the error rate of middles at every length:
+
+| Parakeet | n | edge share | WER | edge error | middle error |
+|---|---|---|---|---|---|
+| 6–9 words | 134 | 52.9% | 13.81 | 18.28 | 8.79 |
+| 10–15 | 216 | 31.3% | 6.06 | 6.83 | 5.71 |
+| 16–25 | 386 | 19.9% | 5.11 | 6.93 | 4.65 |
+| 26+ | 315 | 11.5% | 5.51 | 8.49 | 5.12 |
+
+Both causes are present and they can be separated. Give the shortest bucket
+the *edge share* of the longest one while keeping its own edge and middle
+error rates, and its WER would be 9.88 instead of 13.81. So of the 8.30-point
+short-vs-long gap, 3.93 points are composition and the remaining 4.37 are
+short utterances being genuinely harder word-for-word. Consistent across all
+five configurations:
+
+| System | gap | from composition | share |
+|---|---|---|---|
+| Qwen3-ASR-1.7B | 6.98 | 4.15 | 59% |
+| whisper-large-v3 | 10.61 | 5.83 | 55% |
+| deepgram-nova-3 (formatted) | 9.56 | 5.24 | 55% |
+| deepgram-nova-3 (raw) | 9.78 | 5.09 | 52% |
+| parakeet-tdt-0.6b-v2 | 8.30 | 3.93 | 47% |
+
+**Roughly half of why short utterances score badly is that a short utterance
+is mostly first-and-last words, and first-and-last words are where
+pre-segmented audio is cut.** That is a property of the benchmark's
+segmentation, not of the recognizers — the same conclusion the padding probe
+reached from the other direction, and this is why both belong in the report.
+It also means a benchmark's duration distribution silently sets how much of
+its score is an endpointing measurement.
+
+### Two fields that did not pay off, reported anyway
+
+**`numeric_rate` is uninformative here.** Pooled, WER looks *better* on
+utterances containing digits (6.30 → 2.95 for Parakeet), which would be a
+strange finding. The reason is that both nonzero bins are **100%
+SPGISpeech** — the easiest corpus, because that is where earnings-call figures
+live. There is no within-dataset comparison to make, so the field says nothing
+about numbers and everything about which corpus talks about money. It is in
+the table with that caveat rather than deleted, because the pooled version is
+exactly the kind of number that reads well in a slide.
+
+**`disfluency_rate`'s pooled effect is mostly the same confound.** Pooled it
+is cleanly monotone (Parakeet 5.55 → 9.04 → 10.40, Whisper 6.65 → 11.48 →
+19.43) and its high bin is 86% AMI and 0% SPGISpeech. Within AMI the effect
+largely dissolves and turns non-monotone — Parakeet 8.81 / 6.36 / 10.24 for
+none / low / high — with one exception: **Whisper still degrades sharply**,
+14.30 → 13.90 → 19.88. So "disfluent speech is harder" is mostly "AMI is
+AMI", except for Whisper, where it is a real and specific weakness.
+
+Both fields are zero-inflated — 86% and 96% exactly zero — so terciles put
+everything in one bin and reported nothing at all until the binning was
+changed to none-vs-some. A field can be exact, correctly computed, and still
+silently invisible because of how it was bucketed.
+
+`voiced_fraction` is monotone and modest (Nova-3 6.89 → 6.06 → 5.48) and is
+reported with `field_reliable=False`, because it has one estimator and this
+project's rule is that an unchecked estimate gets flagged rather than used
+quietly.
+
 ---
 
 ## Limitations
@@ -571,6 +706,18 @@ corpus resembles your traffic is the only question a buyer actually has.
   sentence with an equally long fabrication does not trip it at all. It is a
   screen, not a verdict. It is also sensitive on short utterances, where a
   3-word hypothesis against a 2-word reference is 50% over.
+- **Two metadata fields are confounded past the point of usefulness.**
+  `numeric_rate`'s nonzero bins are 100% SPGISpeech and `disfluency_rate`'s
+  high bin is 86% AMI, so neither supports a pooled claim. Both are reported
+  with the confound stated rather than dropped, but a design that sampled for
+  balance on these fields instead of for duration coverage would have been
+  able to say something about them.
+- **The duration finding is a within-subset observation, not a controlled
+  experiment.** Matched-duration buckets equalise length but not speaker,
+  channel or content, so "AMI is no harder than GigaSpeech at matched
+  duration" is a statement about these 1,200 utterances. Testing it properly
+  means re-segmenting one corpus at the other's length distribution, which is
+  the experiment I would run next.
 - **An earlier keyword error rate was dropped rather than reported.** Its
   vocabulary was defined in-set over 1,200 references, which is a noisy rarity
   estimate, and every confidence interval overlapped every other, so it could
