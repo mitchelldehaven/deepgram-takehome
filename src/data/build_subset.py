@@ -59,35 +59,54 @@ def select_evenly(items, k):
 
 
 def sample_dataset(repo, dataset, split, n_utterances, n_shards, rng):
+    """Yield (dataset_name, shard_position, row) one shard at a time.
+
+    A generator rather than a list because `n_utterances: null` means "the
+    whole split", and holding ~10 GB of encoded audio in memory to then write
+    it out is not necessary. The caller materialises only when it has to,
+    which is exactly when a sample is being trimmed.
+    """
     shards = list_shards(repo, dataset.config, split)
-    chosen = select_evenly(shards, n_shards)
-    per_shard = int(np.ceil(n_utterances / len(chosen)))
+    take_all = n_utterances is None
+    chosen = list(range(len(shards))) if not n_shards else select_evenly(shards, n_shards)
+    per_shard = None if take_all else int(np.ceil(n_utterances / len(chosen)))
     logger.info(
         f"{dataset.name}: {len(shards)} shards, reading {len(chosen)} of them "
-        f"({[c for c in chosen]}), up to {per_shard} rows each"
+        f"({[c for c in chosen]}), "
+        + ("every row" if take_all else f"up to {per_shard} rows each")
     )
 
-    records = []
     for position in tqdm(chosen, desc=f"{dataset.name}: shards"):
         path = hf_hub_download(repo, shards[position], repo_type="dataset")
+        if take_all:
+            # Stream in batches: peak memory is one batch, not one shard.
+            for batch in pq.ParquetFile(path).iter_batches(
+                batch_size=32, columns=COLUMNS
+            ):
+                for row in batch.to_pylist():
+                    yield dataset.name, position, row
+            continue
         table = pq.ParquetFile(path).read(columns=COLUMNS)
         take = min(per_shard, table.num_rows)
         rows = rng.choice(table.num_rows, size=take, replace=False)
         for row in table.take(sorted(rows)).to_pylist():
-            records.append((dataset.name, position, row))
+            yield dataset.name, position, row
 
-    # Trim to the requested size without re-biasing toward any part of the
-    # sorted order: shuffle, cut, then restore the original order.
+
+def trim(records, n_utterances, rng):
+    """Cut an oversampled set to size without re-biasing toward any part of
+    the length-sorted order: shuffle, cut, then restore the original order."""
+    records = list(records)
     rng.shuffle(records)
     records = records[:n_utterances]
     records.sort(key=lambda record: record[1])
     return records
 
 
-def write_records(records, audio_dir):
+def write_records(records, audio_dir, total=None):
     audio_dir.mkdir(parents=True, exist_ok=True)
     rows = []
-    for dataset_name, _, row in tqdm(records, desc="decoding audio"):
+    for dataset_name, _, row in tqdm(records, desc="decoding audio", total=total):
         audio, sample_rate = sf.read(io.BytesIO(row["audio"]["bytes"]), dtype="float32")
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
@@ -113,20 +132,23 @@ def main(cfg):
     logger.info(f"githash={cfg.githash}")
     rng = np.random.default_rng(cfg.subset.seed)
 
-    records = []
+    wanted = cfg.subset.utterances_per_dataset
+    rows = []
     for dataset in cfg.subset.datasets:
-        records.extend(
-            sample_dataset(
-                cfg.subset.dataset_path,
-                dataset,
-                cfg.subset.split,
-                cfg.subset.utterances_per_dataset,
-                cfg.subset.shards_per_dataset,
-                rng,
-            )
+        records = sample_dataset(
+            cfg.subset.dataset_path,
+            dataset,
+            cfg.subset.split,
+            wanted,
+            cfg.subset.shards_per_dataset,
+            rng,
         )
+        # Oversampled runs are trimmed, which needs them all in hand. A
+        # whole-split run is streamed straight to disk instead.
+        if wanted is not None:
+            records = trim(records, wanted, rng)
+        rows.extend(write_records(records, AUDIO_DIR, total=wanted))
 
-    rows = write_records(records, AUDIO_DIR)
     SUBSET_FILE.parent.mkdir(parents=True, exist_ok=True)
     save_jsonl(rows, SUBSET_FILE)
 
