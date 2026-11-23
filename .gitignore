@@ -16,6 +16,8 @@ results_*.json
 /data/
 /models/
 /outputs/
+# RUN_TAG=<tag> writes here; see src/paths.py
+/outputs-*/
 .env
 .venv-nemo/
 
