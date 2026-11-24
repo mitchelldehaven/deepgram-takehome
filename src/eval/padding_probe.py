@@ -116,6 +116,16 @@ def main(cfg):
     for name in [s.name for s in cfg.systems if s.name in transcripts]:
         refs, hyps, _ = aligned(subset, transcripts[name], normalizer)
         pairs = counts(refs, hyps)
+        # The masks below index `pairs` with the baseline's dataset labels, so
+        # the two runs must have retained the same utterances in the same
+        # order. They do unless a condition returned no hypothesis for some
+        # id, which would silently shift every comparison by one row -- so
+        # fail loudly instead of scoring misaligned pairs.
+        if len(pairs) != len(base_pairs):
+            raise RuntimeError(
+                f"{name} retained {len(pairs)} utterances against the "
+                f"baseline's {len(base_pairs)}; cannot pair them"
+            )
         for dataset in list(dict.fromkeys(base_ds)) + ["ALL"]:
             mask = slice(None) if dataset == "ALL" else (base_ds == dataset)
             delta, lower, upper, p = paired_bootstrap(

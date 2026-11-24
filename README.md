@@ -200,12 +200,28 @@ src/
     score.py                   scoring, published comparison, rule ablation
     breakdown.py               metadata reliability, slices, length decomposition
     compare.py                 diff two arms, utterance by utterance
-    subset_validation.py       subset vs full splits (runnable; not run in the report)
+    subset_validation.py       subset vs full splits: calibration + A->B->C->D chain
     padding_probe.py           is an edge penalty the model or the segmentation?
 scripts/run_parakeet.py        NeMo inference, runs inside .venv-nemo
 tests/                         regression tests: normalizer, metrics, diff tool
 outputs/                       transcripts and score tables (gitignored)
+outputs-full/                  the same, for the full-test-split run (RUN_TAG=full)
 ```
+
+Score tables worth knowing about, all in `outputs/scores/`:
+
+| file | what it holds |
+|---|---|
+| `metrics.csv` | every metric x system x dataset x normalizer, with CIs |
+| `published.csv` | ours vs the published table, and whether theirs is in our CI |
+| `pairwise.csv` | paired bootstrap for every pair, pooled and per dataset, with how many comparisons were taken |
+| `ablation.csv` | each normalization rule's WER, pooled **and per dataset** |
+| `breakdown.csv` | WER by metadata bin, pooled and within each corpus |
+| `effect_sizes.csv` | how many WER points each clip property is worth, vs the model and normalizer effects |
+| `duration_buckets.csv` | WER per system x dataset at fixed absolute durations |
+| `duration_matched.csv` | each corpus reweighted to GigaSpeech's duration distribution |
+| `empty_references.csv` | references each normalizer empties out, and so drops from scoring |
+| `subset_validation.csv` | subset vs full split, with the error decomposed into batching / sampling / residual |
 
 ## Tests
 
@@ -214,7 +230,8 @@ PYTHONPATH=. uv run pytest tests/ -q
 ```
 
 They cover three things: the custom normalizer's number handling, where three
-bugs lived long enough to reach a draft of the report; the metric contract,
+bugs survived well past the code review that should have caught them; the
+metric contract,
 where a test caught an insertion being charged to the middle of an utterance
 rather than its trailing edge; and the diff tool's gap decomposition, which
 has to sum exactly to the headline or it is sorting by a meaningless number. The useful property to preserve

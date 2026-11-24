@@ -1,928 +1,200 @@
-# What a leaderboard WER actually measures
-
-A reproduction of the [🤗 Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard)
-(English short-form), on 1200 utterances (2.18 h) drawn from three of its
-datasets, across five system configurations.
-
-Setup and rerun instructions are in [README.md](README.md). Every number below
-comes from `outputs/scores/`, and every run stamps its git hash into `logs/`.
-
----
-
-## Summary
-
-1. **The reproduction holds.** Across 9 system×dataset cells, our WER lands a
-   mean **+0.58** above published, and the published number falls inside our
-   95% CI in **7 of 9**. The bias is one-directional, which points at
-   configuration rather than noise.
-2. **Normalization decides what you may conclude, not who is ahead.** Under
-   the leaderboard's normalizer, Deepgram Nova-3 with default formatting beats
-   Whisper large-v3 by 0.92 WER and the paired bootstrap calls it (p<0.001).
-   Under a second defensible normalizer the ordering is the same but the gap
-   is 0.28 and **unresolvable** (p=0.36). Same audio, same models, same
-   metric — a conclusion that exists under one set of text conventions and
-   not the other.
-3. **Output formatting is worth up to 1.4 WER on its own.** The *same*
-   Nova-3 model on the *same* audio scores 0.56 (leaderboard normalizer) to
-   1.36 (ours) worse purely by leaving the API's punctuation and numeral
-   formatting on. Nothing about the recognition changed.
-4. **The top three are statistically indistinguishable.** Parakeet (6.04),
-   Nova-3 raw (6.05) and Qwen3-ASR (6.08) are separated by 0.04 WER where the
-   paired bootstrap resolves ±0.35. The leaderboard presents them at ranks
-   36, unranked, and 17.
-5. **WER hides what kind of error, and three added metrics disagree with it
-   about who wins.** Whisper's WER is driven by *deletions* (3.11 per 100
-   words, double everyone else's). Qwen3-ASR hallucinates three times less
-   than anything else and is separated from the whole field at p<0.001, while
-   sitting third on WER. Parakeet is first on WER and **last** on
-   hallucination.
-6. **Part of a vendor's WER is the benchmark's segmentation, not the model.**
-   Nova-3's edge deletions on AMI drop by a third when the audio is padded
-   with silence, which adds no information and so cannot be a recognition
-   gain. That closes 44% of its gap to Parakeet.
-7. **How the audio was cut up matters more than which model you pick.** Short
-   clips score about 2.5 times worse than medium-length ones — 7.6 WER points
-   of difference, where the gap between the best and worst system here is 1.5
-   points. At *matched* absolute duration AMI is no harder than
-   GigaSpeech, so most of "AMI is the hard corpus" is that AMI's utterances
-   are short. And 47–59% of the short-vs-long gap is pure composition: a short
-   utterance is mostly first-and-last words, which is exactly where
-   pre-segmented audio is cut.
-8. **Our own metadata failed its first validation.** The SNR estimators are
-   biased by +0.8 to +12.1 dB against injected ground truth. Their *ranking*
-   is sound (ρ 0.92–0.98), so tercile breakdowns are defensible and absolute
-   dB values are not.
-
----
-
-## 1. Recreating it
-
-### The subset
-
-Three datasets spanning the board's difficulty range: **AMI-Cleaned**
-(meetings, spontaneous), **GigaSpeech-Cleaned** (podcast/YouTube) and
-**SPGISpeech** (earnings calls). 400 utterances each, 1200 total, 22,439
-reference words.
-
-The brief asks for "a meaningful subset of its evaluation data", which can
-mean fewer datasets, fewer utterances within a dataset, or both. This is both,
-and the two decisions are justified differently: **which datasets** is a
-coverage argument, **how many utterances** is a statistical-power one.
-
-**Which datasets.** The board's nine columns are not reproducible in full —
-two are private, and two more are not in the aggregated repo (see the end of
-this section). Of what remains, three were chosen to span its difficulty
-range rather than to sample it randomly, so that the normalization and
-metadata findings have a hard case and an easy case to contrast. That is a
-deliberate trade: it maximises contrast and forfeits any claim to a
-board-representative average, which is why nothing here reports an "Average
-WER".
-
-**Which utterances.** The upstream parquets are **sorted by audio length,
-globally and descending**. Reading the first shard or the first N rows
-therefore returns only the longest utterances, and duration correlates with
-WER — by 7.6 points, as section 4 ends up measuring. The sampler instead takes
-shards at even intervals across the sorted order and samples rows uniformly
-within each, which spans the duration distribution by construction.
-
-For two of the three datasets that precaution turns out to be unnecessary in
-the best way: **there are fewer shards than we ask for, so every shard is
-read, and the sample is a plain uniform random sample of the entire test
-split.**
-
-| Dataset | shards read | rows sampled | split size | coverage |
-|---|---|---|---|---|
-| AMI-Cleaned | **3 of 3** | 400 | 7,805 | uniform random over the whole split |
-| GigaSpeech-Cleaned | **8 of 8** | 400 | 18,768 | uniform random over the whole split |
-| SPGISpeech | 8 of 38 | 400 | — | systematic over length-ordered shards |
-
-So on AMI and GigaSpeech there is no shard-selection question at all, and the
-sample is unbiased for *any* utterance property by construction — duration
-included. Only SPGISpeech relies on the systematic design, and it is the
-narrowest of the three in duration anyway (5.0–15.0 s). This matters again
-when explaining the reproduction gap below.
-
-Resulting spread:
-
-| Dataset | n | duration min/median/max | ref words |
-|---|---|---|---|
-| AMI-Cleaned | 400 | 1.0 / 3.0 / 17.4 s | 4,297 |
-| GigaSpeech-Cleaned | 400 | 1.1 / 6.5 / 19.1 s | 8,334 |
-| SPGISpeech | 400 | 5.0 / 8.9 / 15.0 s | 9,808 |
-
-**Why 400 is enough** is not an assertion, it is a measurement. The paired
-bootstrap resolves system differences down to about **±0.35 WER** on this
-sample. That is sufficient to separate Whisper from the rest (gaps of 1.5–2.5)
-and insufficient to separate the top three (gaps of 0.04). Both of those are
-reported as such below rather than papered over. Resolving the top three would
-need roughly 100× the data, which is a real statement about the leaderboard,
-not a defect in the sample.
-
-### Reproduction vs published
-
-Leaderboard normalizer, as published:
-
-| System | Dataset | Ours | Published | Gap |
-|---|---|---|---|---|
-| whisper-large-v3 | AMI-Cleaned | 14.64 | 13.63 | +1.01 |
-| whisper-large-v3 | GigaSpeech-Cleaned | 9.49 | 8.35 | +1.14 |
-| whisper-large-v3 | SPGISpeech | 2.84 | 2.71 | +0.13 |
-| Qwen3-ASR-1.7B | AMI-Cleaned | 9.27 | 8.31 | +0.96 |
-| Qwen3-ASR-1.7B | GigaSpeech-Cleaned | 8.03 | 7.22 | +0.81 |
-| Qwen3-ASR-1.7B | SPGISpeech | 3.05 | 2.57 | **+0.48** |
-| parakeet-tdt-0.6b-v2 | AMI-Cleaned | 8.34 | 9.09 | −0.75 |
-| parakeet-tdt-0.6b-v2 | GigaSpeech-Cleaned | 9.20 | 8.15 | +1.05 |
-| parakeet-tdt-0.6b-v2 | SPGISpeech | 2.37 | 1.94 | **+0.43** |
-
-Bold = published value outside our 95% CI.
-
-**Why they differ.** The gaps are **+0.58 on average and 8 of 9 are
-positive**, which is the useful clue, because the two candidate explanations
-predict different things. Sampling noise predicts random signs; a
-configuration difference predicts one direction. Under random signs, 8 of 9
-agreeing has p = 0.039.
-
-So the explanations separate:
-
-- **Sampling explains the spread, not the sign.** It is why individual cells
-  are off by ±1 rather than ±0.1, and our CIs account for exactly that — 7 of
-  9 published values land inside. But it cannot produce a one-directional
-  bias. This is firmer than it would normally be, because on AMI and
-  GigaSpeech *every shard was read* and the 400 rows are a uniform random
-  sample of the whole split, so the sample is unbiased for any utterance
-  property by construction. Those two datasets also carry the *larger* mean
-  gap (+0.70, against +0.35 for the one dataset where sampling could bias
-  anything). Sampling is not what is going on.
-- **Decoding configuration is the likeliest cause of the sign.** We run
-  greedy, batch 32, fp16, `language="en"` forced. The leaderboard's per-model
-  scripts differ in batching and precision, and batching changes padding,
-  which changes Whisper's output. Our numbers being consistently slightly
-  worse is what an unoptimised-but-correct configuration looks like.
-- **Model version drift** contributes an unknown amount.
-  `nvidia/parakeet-tdt-0.6b-v2` is a moving reference; we pin the leaderboard
-  version (`20-11-2026`) but cannot pin their inference commit.
-- **The one exception points the same way.** Parakeet on AMI is *better* than
-  published (−0.75). A systematic error in our scoring or normalization would
-  not spare one cell; a per-model configuration difference would.
-
-What this does **not** support is the comfortable reading that the gap is just
-noise. It is small, but it is real and it has a direction, and chasing the
-per-model decoding scripts is the first thing I would do with more time.
-
-**The headline "Average WER" is not reproducible by anyone outside Hugging
-Face.** Two of its nine default columns are private datasets, and a third
-(`Earnings22-Cleaned-AA-chunked`) is scored by concatenating chunks against a
-separately hosted full-transcript set. We compare per-dataset numbers, which
-are reproducible. This is worth stating plainly: the single number at the top
-of the board cannot be independently audited.
-
-### A note on who is and isn't ranked
-
-Deepgram appears **nowhere** on this leaderboard — not in any of its 32
-versions back to 2026-05-20, not in `api/providers/` on GitHub. Meanwhile 22
-competitor APIs have submitted integrations, including AssemblyAI (#18),
-ElevenLabs (#8), Speechmatics, Rev, Soniox, Gladia, Azure (#4), OpenAI and
-Zoom (#1). Proprietary systems get listed by the vendor submitting a provider
-file, so presence is opt-in and absence is a decision.
-
-I can observe the absence; I can't observe the reason, and this report doesn't
-guess at one. The consequence is what matters: **there is no published number
-for Deepgram on the benchmark its competitors are ranked on**, so the only way
-to get a comparable figure is to run it through the identical pipeline. That
-is what `deepgram_nova_3_raw` is.
-
----
-
-## 2. Testing the normalization
-
-The leaderboard uses Whisper's `EnglishTextNormalizer` (vendored here at
-pinned commit `c469619`). It makes choices nobody publishes alongside the
-numbers: it deletes filler words, expands contractions, strips apostrophes,
-maps British to American spelling, and canonicalises number words to digits.
-
-Our alternative (`config/normalization/custom.yaml`) disagrees on six
-specific points, each independently togglable. These are not *better* choices
-— they are *defensible* ones, which is the whole point. (It disagreed on
-seven until one of them turned out to be indefensible; see *The rule that did
-not survive the diff tool*, below.)
-
-### Ranking under each normalizer
-
-| | Leaderboard normalizer | | Our normalizer | |
-|---|---|---|---|---|
-| | WER | 95% CI | WER | 95% CI |
-| parakeet-tdt-0.6b-v2 | **6.04** | [5.49, 6.66] | **7.56** | [6.96, 8.24] |
-| deepgram-nova-3 (raw) | 6.05 | [5.46, 6.68] | 7.70 | [7.07, 8.37] |
-| Qwen3-ASR-1.7B | 6.08 | [5.54, 6.66] | 8.02 | [7.41, 8.69] |
-| deepgram-nova-3 (formatted) | 6.62 | [6.04, 7.26] | 9.06 | [8.37, 9.79] |
-| whisper-large-v3 | 7.54 | [6.91, 8.22] | 9.58 | [8.87, 10.35] |
-
-**The orderings agree.** Every system sits at the same rank under both
-normalizers. An earlier version of this table had two rank flips, and they
-were an artifact of a bad rule of ours rather than a property of the
-normalizers — see below, because how that was found matters more than the
-flips did.
-
-What does not survive the change of normalizer is the *significance*. The
-load-bearing row is the last two:
-
-| Nova-3 (formatted) vs whisper-large-v3 | Δ WER | 95% CI | p |
-|---|---|---|---|
-| leaderboard normalizer | **−0.92** | [−1.36, −0.47] | <0.001 |
-| ours | −0.52 | [−1.14, +0.09] | 0.095 |
-
-Both normalizers put Nova-3 ahead. Only one of them entitles you to say so.
-A buyer reading "Nova-3 beats Whisper by 0.9 WER" is reading a fact about the
-normalizer as much as about the models: under text conventions that are no
-less defensible, the same 1,200 utterances cannot tell the two apart. The
-claim that moves is not the ranking, it is the confidence — which is the
-claim a procurement decision actually rests on.
-
-### Which rule does the work
-
-Mean |ΔWER| across systems from flipping one rule:
-
-| Rule | Δ WER | What it does |
-|---|---|---|
-| `remove_fillers` | 0.65 | deletes um/uh/mm before scoring |
-| `spell_out_numbers` | 0.49 | digits ↔ words |
-| `expand_contractions` | 0.17 | "don't" → "do not" |
-| `keep_apostrophes` | 0.07 | |
-| `british_to_american` | 0.04 | |
-| `normalize_currency` | 0.01 | near-no-op: no currency symbols in these refs |
-| `strip_non_speech` | 0.00 | these refs carry no `[laughter]` markers |
-
-One rule dominates, and it is the one to worry about:
-**deleting disfluencies before scoring is a 0.65 WER subsidy**, and it
-is not neutral between systems — it rewards models that don't emit fillers and
-costs nothing to models that do. On spontaneous speech that is a meaningful
-thumb on the scale, and it is invisible in the published number.
-
-### The rule that did not survive the diff tool
-
-A number in the ablation table says a rule matters but not *why*, so
-`src/eval/compare.py` re-scores with one rule flipped and prints the
-utterances that moved. Run against `collapse_hyphenation` — then the largest
-line in the table, 0.93 WER on Nova-3 alone — the mechanism was immediate:
-
-```
-ref   ... as a fortytwoyearold that i have one more year to get all my selfcontrol together
-A     ... as a [+forty] [+two] [+year] {fortytwoyearold>old} ... all my [+self] {selfcontrol>control} together
-B     ... as a forty two year old that i have one more year to get all my self control together
-```
-
-The rule closed hyphens up: `re-run` → `rerun`, but also
-`forty-two-year-old` → `fortytwoyearold`. The second is a token no recognizer
-will ever emit, and the metric charged four errors for it. Nobody utters a
-hyphen; a speaker says four words and every system writes four.
-
-The fix is to treat a hyphen as the word boundary it is. That turned out to
-delete the rule rather than repair it, because **the leaderboard's normalizer
-already does exactly that** — a hyphen is Unicode category `Pd`, and its
-`remove_symbols_and_diacritics` maps every `P` character to a space. Once ours
-agreed, there was nothing left to disagree about, so the toggle is gone and
-the custom normalizer is down to six rules.
-
-Three things followed, and the third is the one that matters:
-
-1. Every custom-normalizer WER fell by 1.6–2.1 points.
-2. `spell_out_numbers` rose from 0.27 to 0.42, because it had been partly
-   masked: spelled-out numbers carry hyphens, so the collapse rule was
-   absorbing some of its effect. Fixing the suffix bugs below took it to
-   0.49.
-3. **Both rank flips disappeared.** The earlier table had Qwen3 above Nova-3
-   raw, and Whisper above Nova-3 formatted, under our normalizer only. Neither
-   was a fact about normalization. Both were our own rule inflating WER
-   unevenly — it punishes systems in proportion to how often their output
-   meets a hyphenated reference, which is a property of the reference text,
-   not of the recognizer.
-
-So the headline claim of this section got *weaker and truer at the same
-time*. "The ranking moves when the normalization changes" was the more
-dramatic finding and it was partly an artifact of a bug in the thing doing the
-measuring. What is left — the ordering holds, the significance does not — is a
-smaller claim that is actually load-bearing, and it is the one that survives
-scrutiny.
-
-The general lesson is the uncomfortable one. This rule had a docstring, a
-passing test, a config toggle and a number in an ablation table. It was the
-*largest* number in that table, which made it look like the most important
-finding in the section rather than the biggest error in it. Nothing about
-reading the code revealed the problem. Printing one utterance did.
-
-### What the remaining differences are
-
-Our six disagreements, run on probe sentences rather than described from the
-config, because the previous two subsections are what happens when a
-normalizer is described rather than executed:
-
-| | leaderboard | ours |
-|---|---|---|
-| `um i uh think so hmm` | `i think so` | `um i uh think so hmm` |
-| `i don't know we'll see` | `i do not know we will see` | `i don't know we'll see` |
-| `that's the dog's bowl` | `that is the dog s bowl` | `that's the dog's bowl` |
-| `the colour of the centre` | `the color of the center` | `the colour of the centre` |
-| `twenty five and 1,200` | `25 and 1200` | `twenty five and one thousand two hundred` |
-| `it cost $5 million` | `it cost $5000000` | `it cost five million dollars` |
-| `a forty-two-year-old re-run` | `a 42 year old re run` | `a forty two year old re run` |
-| `[laughter] hello (inaudible)` | `hello` | `hello` |
-
-Six differences and one agreement. The directions are consistent: the
-leaderboard canonicalizes *away* from what was said (deleting disfluencies,
-expanding contractions, converting words to digits), and ours canonicalizes
-*toward* it. Neither is correct. They answer different questions — "did the
-system recover the content" versus "did the system transcribe the utterance"
-— and only the second is the one a caption or a medical note is graded on.
-
-Writing that table is also what surfaced the last two bugs in this report.
-Three of the probe rows came back wrong on our side, none of them in a rule
-we had chosen:
-
-- `the 22nd` → `the twenty twond`. The number pattern matched `22` and left
-  `nd` glued to the result. **Zero references contain an ordinal and 60
-  hypotheses do**, so every spurious error landed on the systems.
-- `the 1960s` → `... sixtys`, the same stranding one suffix over.
-- `the 3:00 meeting` → `the three zero meeting`, and `15%` → `fifteen`, the
-  percent sign stripped as punctuation. That one was asymmetric and therefore
-  worse than it looks: a reference's `15%` lost its "percent" while a system
-  writing `fifteen percent` kept the word, so **agreeing scored an
-  insertion**.
-
-Fixed, with tests. The effect is small on four systems (0.02–0.06 WER) and
-not small on the fifth: **Nova-3 formatted moved 0.29**, because `numerals`
-is exactly the flag that makes it emit the ordinals, digits and percent signs
-our normalizer was mishandling. The formatting penalty under our normalizer
-drops from 1.62 to 1.36 — so roughly a fifth of what section 2 was about to
-report as a formatting penalty was our own bug, charged to the one
-configuration whose output triggered it.
-
-One judgement call is left in place rather than fixed: a bare four-digit
-number is read as a quantity (`2019` → "two thousand and nineteen") rather
-than as a year ("twenty nineteen"), because nothing in the text distinguishes
-`2019` the year from `1200` the count. `num2words` will do either; choosing
-requires a guess, and a wrong guess here is the same class of silent error as
-the three above.
-
-### Output formatting is a measurement artifact
-
-Nova-3 twice, same model, same audio, differing only in API flags
-(`punctuate`, `smart_format`, `numerals`):
-
-| Normalizer | raw | formatted | Δ | p |
-|---|---|---|---|---|
-| leaderboard | 6.05 | 6.62 | **+0.56** | <0.001 |
-| ours | 7.70 | 9.06 | **+1.36** | <0.001 |
-
-The open models the board ranks emit bare lowercase text; the normalizer grew
-up around that convention and handles it cleanly. A commercial API that
-returns production-ready formatted text is penalised for it. **Anyone
-benchmarking a formatting API against leaderboard numbers must turn formatting
-off first, or they will measure the wrong thing by up to 1.4 WER** — larger
-than the gap between ranks 17 and 53 on these datasets.
-
----
-
-## 3. Looking past the metric
-
-### What WER misses
-
-WER weights every word equally and every error type equally. Two systems at
-the same WER can be very different products. The sub/del/ins split, leaderboard
-normalizer:
-
-| System | WER | sub | del | ins |
-|---|---|---|---|---|
-| parakeet-tdt-0.6b-v2 | 6.04 | 3.22 | 1.57 | 1.25 |
-| deepgram-nova-3 (raw) | 6.05 | 3.08 | 1.59 | 1.38 |
-| Qwen3-ASR-1.7B | 6.08 | 3.05 | 1.62 | 1.41 |
-| whisper-large-v3 | 7.54 | 3.18 | **3.11** | 1.24 |
-
-Whisper's substitution rate is *normal*. Its deletion rate is **double**
-everyone else's, and that single component is essentially its entire gap from
-the field. Whisper isn't mishearing more — it's dropping content, consistent
-with its known tendency to truncate. For captioning that's a silent
-correctness failure; for a voice agent extracting a confirmation number,
-dropping is far worse than substituting, because a substitution is often
-detectable downstream and a deletion is not.
-
-### The three metrics I'd add
-
-All three answer the same question from different directions: *what does an
-average hide?* Each is a function `(references, hypotheses) -> per-utterance
-(numerator, denominator)`, which is what lets all four share one bootstrap, one
-significance test and one breakdown path. Thresholds are in
-`config/eval/openasr.yaml` so a reader can move them and rescore in seconds.
-
-| Metric | Definition | Denominator | Whose decision |
-|---|---|---|---|
-| **Catastrophic failure** | utterances whose own WER > 50% | utterances | staffing a human review queue, writing an SLA |
-| **Hallucination** | hypothesis ≥ 1.2× reference length | utterances | anyone for whom invented text is worse than missing text — legal, medical, voice agents |
-| **Edge error** | errors in the first/last 2 reference words | edge word slots | anyone benchmarking a prerecorded API on pre-segmented audio; and the benchmark's own designers |
-
-The denominators differ on purpose, and the difference is the point. On this
-subset WER divides by 22,891 reference words, the two rate metrics by 1,194
-utterances, and the edge metric by 4,204 edge word slots. A rate over words and
-a rate over utterances answer different questions, and a system can look fine
-on one while being unshippable on the other.
-
-### Result: the four metrics disagree about who wins
-
-Leaderboard normalizer, all 1,200 utterances:
-
-| System | WER | Catastrophic | Hallucination | Edge error |
-|---|---|---|---|---|
-| parakeet-tdt-0.6b-v2 | **6.04** | 2.26 | 2.01 | **8.82** |
-| deepgram-nova-3 (raw) | 6.05 | 2.51 | 1.76 | 10.28 |
-| Qwen3-ASR-1.7B | 6.08 | **2.01** | **0.59** | 9.04 |
-| deepgram-nova-3 (formatted) | 6.62 | 2.51 | 1.84 | 11.04 |
-| whisper-large-v3 | 7.54 | 3.02 | 1.68 | 12.25 |
-
-**Qwen3-ASR hallucinates three times less than anything else, and that is the
-one result here the sample resolves cleanly.** It is third on WER — inside a
-three-way tie — but its hallucination rate of 0.59 separates it from all four
-other configurations at p<0.001 (gaps of 1.17 to 1.42, every interval clear of
-zero). Four separated pairs out of ten, and all four are Qwen against the
-field.
-
-Meanwhile **Parakeet is first on WER and last on hallucination.** The system
-the leaderboard would hand you is the one most likely to invent material. For a
-voice agent reading back an order number, that is the wrong trade, and no
-amount of staring at the published column reveals it.
-
-**Whisper is second-best on hallucination despite being worst on WER.** That is
-consistent with its error composition above: it deletes, it does not invent.
-Whichever of those two failures you can tolerate decides whether Whisper's
-7.54 or Parakeet's 6.04 is the better number for you.
-
-### Where the catastrophic tail lives
+# Reproducing the Open ASR Leaderboard
+
+I reproduced the [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard) on AMI, GigaSpeech and SPGISpeech with five systems:
+
+* Whisper large-v3, 
+* Qwen3-ASR-1.7B, 
+* Parakeet-TDT-0.6B-v2, 
+* Deepgram Nova-3 (raw and formatted). 
+
+I scored 400 clips per dataset (1,200 clips, 2.2 h), then re-ran the three open models on all 65,914 clips of those splits (144 h) to
+validate the sampling approach. Setup and rerun instructions are in
+[README.md](README.md); every number below comes from a CSV in
+`outputs/scores/` or `outputs-full/scores/`.
+
+To tell a real gap from noise I redrew the clip list at random 2,000 times and
+measured how far each WER moved, using the same re-drawn list for both systems
+in a comparison.
+
+The sample was sized for pooled comparisons, and that is where it holds: at
+1,194 clips it detects gaps of 0.54 WER. Sliced to one dataset it leaves ~400
+clips and detects 0.83 on GigaSpeech, 0.69 on SPGISpeech and only 1.57 on AMI,
+whose short clips make per-clip error variance large. Resolving 0.5 WER on AMI
+would need about 3,900 clips, so 400 was the wrong size for an AMI ranking —
+the design error was claiming per-dataset results from a sample built for
+pooled ones.
+
+So per-dataset comparisons between systems below come from the full splits
+(AMI: 7,715 clips, error bar 0.4). Two per-dataset results are from the
+1,200-clip sample, because Nova-3 and the metadata were only run there; both
+are flagged in place and stated as directional rather than as rankings.
+
+## Findings
+
+**The reproduction is close but uniformly high.** On the full splits all nine
+system × dataset numbers land above published, by +0.18 to +0.78, averaging
++0.45. The published ordering reproduces exactly.
 
 | System | AMI | GigaSpeech | SPGISpeech |
 |---|---|---|---|
-| whisper-large-v3 | **7.61** | 1.50 | 0.00 |
-| deepgram-nova-3 (raw) | 5.84 | 1.50 | 0.25 |
-| parakeet-tdt-0.6b-v2 | 5.58 | 1.25 | 0.00 |
-| Qwen3-ASR-1.7B | 5.08 | 1.00 | 0.00 |
+| parakeet-tdt-0.6b-v2 | 9.51 (+0.42) | 8.83 (+0.68) | 2.12 (+0.18) |
+| Qwen3-ASR-1.7B | 8.75 (+0.44) | 7.84 (+0.62) | 2.82 (+0.25) |
+| whisper-large-v3 | 14.10 (+0.47) | 9.13 (+0.78) | 2.94 (+0.23) |
 
-Unusable utterances are ~20× more common on meeting audio than on earnings
-calls, for every system. A pooled 2–3% is the average of "one in thirteen" and
-"never", which is not a number anyone can staff against.
+The gap isn't sampling (I scored every clip), isn't batching (0.01 WER), and
+isn't one broken system, since three different models on three code paths all
+shifted by nearly the same amount. The likeliest cause is decoding
+configuration — I run greedy, batch 32, fp16, English forced, while the board
+uses per-model scripts. The sample itself held up: the full-split WER fell
+inside the 1,200-clip error bar in all 9 cells.
 
-**Catastrophic failure is the one metric this sample cannot support.** Only 1 of
-10 system pairs separates. At a ~2.5% rate over 1,200 utterances there are
-roughly 30 events per system, so the metric is badly underpowered and I report
-it as directional only. That is a sample-size problem, not a reason to drop the
-metric — it is the first thing I would spend more utterances on, because it is
-also the metric with the most direct operational consequence.
+Two things worth flagging about the benchmark. Four of its nine datasets aren't
+reproducible (two private, two absent from the public repo), so the headline
+"Average WER" can't be checked by anyone outside Hugging Face. And the source
+files are sorted longest-audio-first, so reading the first N rows gives you
+only the longest clips — which matters because clip length is the largest
+single driver of WER here.
 
-### Edge error, and why it is a measurement artifact as much as a result
+**One normalization rule decides who wins AMI.** The leaderboard's normalizer
+deletes fillers ("um", "uh", "hmm") before scoring. I chose to make a normalizer that keeps them, knowing that AMI is full of these types of disfluencies. Some models benefit from this kind of normalization than others, like Whisper, so looked at this specifically. The systems disagree about whether fillers are words at all: AMI's references contain 37.4 fillers per 1,000 words, and Parakeet writes 35.0 of them while Whisper writes 3.6 and Qwen3 2.2 — a training-data difference, not an accuracy
+one. Deleting fillers is therefore worth 2.8 WER to Whisper and 3.1 to Qwen3,
+but only 0.5 to Parakeet. On every scorable AMI clip:
 
-Errors concentrate at utterance boundaries for every system, because every
-utterance here is a slice cut out of a longer recording. Decomposed on AMI, per
-100 edge slots:
-
-| System | edge sub | edge del | edge ins | mid del |
-|---|---|---|---|---|
-| parakeet-tdt-0.6b-v2 | 5.27 | 2.59 | 3.39 | 1.88 |
-| deepgram-nova-3 (raw) | 5.00 | **6.52** | 3.75 | 2.71 |
-| Qwen3-ASR-1.7B | 4.64 | 4.91 | 2.14 | 3.59 |
-| whisper-large-v3 | 6.70 | **11.43** | 2.14 | 7.90 |
-
-Nova-3's deficit against Parakeet at the edges is **+3.93 deletions** with
-substitutions and insertions essentially level (−0.27, +0.36). It is omission,
-not invention.
-
-So I tested whether it was recoverable. `src/eval/padding_probe.py` re-runs
-Nova-3 with 0.5 s and 1.0 s of digital silence prepended and appended —
-which adds **no information**, so any improvement cannot be a recognition
-gain:
-
-| Condition | AMI WER | edge del | edge ins |
+| Normalizer | Parakeet | Qwen3 | Winner |
 |---|---|---|---|
-| unpadded | 9.99 | 6.52 | 3.75 |
-| +0.5 s silence | **9.27** | **4.38** | 2.50 |
-| +1.0 s silence | 9.48 | 4.64 | 2.41 |
+| leaderboard's (deletes fillers) | 9.51 | 8.75 | Qwen3, by 0.75 |
+| mine (keeps fillers) | 11.22 | 13.91 | Parakeet, by 2.69 |
 
-Edge deletions fall by a third, middle deletions do not move (2.71 → 2.78),
-and the WER change on AMI is −0.72 [−1.35, −0.09], p=0.022. Edge *insertions*
-fall too, so padding suppressed hallucination rather than inducing it over the
-new silence — the opposite of what I expected, and plausibly because an abrupt
-truncation mid-utterance is itself what reads as continuing speech.
+Whether you want this type of filler removal normalization tends to be task specific decision. For something like meeting notes, you probably don't care about how many times someone said "um". For legal / medical note taking, you probably want the transcript to be as close as possible to the true. 
 
-Three caveats, because this is the most over-claimable result in the report:
+**Formatting is penalised as if it were error.** Nova-3 with default
+formatting on scores +0.56 worse under the leaderboard's normalizer and +1.36
+worse under mine, same model and same audio. The normalizer grew up around
+open models that emit bare lowercase text, so an API returning
+production-ready punctuation and numerals pays for it — more than the gap
+between ranks 17 and 53 on these datasets.
 
-1. **Eight tests were run; the Bonferroni threshold is 0.00625 and none
-   survive it.** The deletion effect is credible because it is large and
-   uniform in direction across all six dataset×condition cells, not because of
-   any single p-value.
-2. **It is not monotone.** 0.5 s beats 1.0 s, which argues against a simple
-   "the endpointer needs runway" story.
-3. **On SPGISpeech, deletions fell 52% but WER did not move**, because
-   insertions rose to compensate. My prediction that the clean corpus would be
-   an inert control was wrong: padding changes edge behaviour everywhere, it
-   only *helps* where deletions dominate.
+**Equal WERs hide unequal failure modes.** Parakeet, Nova-3 raw and Qwen3 sit
+at 6.04 / 6.05 / 6.08 — a three-way tie. Whisper's 7.53 is almost entirely one
+column: it deletes 3.11 words per 100 against roughly 1.6 for everyone else,
+while its substitution rate is normal. Whisper tends to have a problem of missing transcript portions, apparently worse than other models used. 
 
-Padding closes about 44% of Nova-3's AMI gap to Parakeet (+1.65 → +0.93), so
-segmentation explains part of it and transcription conventions explain the
-rest. The decision this informs is concrete: **anyone benchmarking a
-prerecorded API against leaderboard numbers on pre-segmented corpora should
-pad the audio, or they are partly measuring the endpointer instead of the
-recognizer.**
+**The metric I added: a long-output rate**, the share of clips where a system
+emits at least 1.2x the reference's word count — a cheap screen for a decoder
+running past the end of the speech. Qwen3 scores 0.59 against 1.68 to 2.01 for
+the others and is the only system that separates from the field, while its WER
+sits inside the three-way tie. That is the whole result: the gaps among the
+other four (0.25 to 0.34, p = 0.37 to 0.51) are well below what 1,194 clips
+resolve, so they can't be ranked.
 
----
+Reading the flagged clips also narrows what the metric means. Of Parakeet's 24,
+most are speech captured at the clip edge that AMI's reference truncates away,
+full words written where the reference has stutter fragments (`i d` → `i do
+not`), or digit strings written as spoken words; two or three are substitution
+cascades on bad audio and none is a runaway decoder. So on pre-segmented
+conversational speech this metric largely measures verbatim style and reference
+truncation, and only a terseness outlier like Qwen3 stands clear of that. It
+would do its intended job better on long-form audio, where runaway decoding
+actually occurs.
 
-## 4. Characterizing the data
+**Some of a vendor's score belongs to the benchmark.** Errors cluster at clip
+edges for every system, because every clip was cut out of a longer recording.
+Adding 0.5 s of digital silence to each end of Nova-3's AMI clips — which adds
+no information — drops its WER from 9.97 to 9.23 and its edge deletions from
+6.52 to 4.38, while middle deletions don't move.
 
-Per-utterance metadata in `src/data/metadata.py`: duration, two SNR estimates,
-two speech-rate estimates, voiced fraction, reference length, disfluency rate,
-numeric rate.
+This is 394 AMI clips, since Nova-3 was never run on the full splits, so treat
+the direction as the result and not the magnitude. It is a paired before/after
+on identical audio, which has far lower variance than comparing two systems,
+and the effect points the same way in five of six dataset × condition
+cells — but I ran eight versions of the test and the strongest alone would
+come up by chance about 1 time in 70, which out of eight tries is roughly what
+noise gives. What I'd defend: pre-segmentation costs a production endpointer
+real WER on this corpus. What I would not: the 0.74-point figure, or the
+derived claim that it accounts for half of Nova-3's AMI gap. Confirming the
+size needs Nova-3 on the full 7,805-clip AMI split, which is 8 hours of audio.
 
-The fields fall into three kinds, and keeping them apart is what makes the
-section honest:
+**Clip properties move WER more than model choice does.** Breaking results
+down by per-clip metadata, the spread from worst to best bin is 7.4 WER for
+duration, 7.0 for disfluency rate, 6.8 for word count, 4.5 for numeric
+content, 3.9 for speech rate, 1.6 for SNR and 1.2 for voiced fraction. The
+spread across all five systems is 1.5, and across the two normalizers 1.9.
+Five of seven clip properties matter more than which system you pick.
 
-| Kind | Fields | Can it be checked? |
-|---|---|---|
-| **estimated**, two ways | `snr_db`, `speech_rate` | yes — two estimators, then against injected ground truth |
-| **measured** | `duration_s`, `n_words`, `disfluency_rate`, `numeric_rate` | no check needed: a sample count and a word count are exact |
-| **estimated**, one way | `voiced_fraction` | no — reported, flagged, not concluded from |
+That partly dissolves "AMI is the hard corpus." AMI's clips are much shorter
+(124 scored clips under two seconds, against 36 of GigaSpeech's 400).
+Reweighting AMI to GigaSpeech's length distribution removes 1.8–2.4 WER points,
+which is the entire AMI–GigaSpeech gap for four of the five systems. This is
+also the 1,200-clip sample, so the per-system numbers carry ~1.6 WER of
+uncertainty each and I wouldn't rank systems by them; what makes the result
+credible is that five independently trained systems agree on the size to within
+0.7 points, which noise would not produce. Whisper is the exception and the important one: its AMI gap
+is 5.08 and length only takes it to 3.32, so length explains about a third of
+the result that "AMI is hard" is built on.
 
-That table is also a bug report on my own design. The reliability gate was
-originally the *only* route into the breakdown, so a field without a second
-estimator could not be sliced on at all. Four exact fields sat computed and
-unused for that reason — including `duration_s`, which turns out to be the
-largest effect of any field we *estimate or measure*, second only to the
-dataset label itself. A correctness check had quietly become an
-access-control check.
-
-### Testing the metadata before trusting it
-
-Two estimators per acoustic field, chosen not to share a failure mode:
-
-| Field | Spearman | bin agreement | κ | verdict |
-|---|---|---|---|---|
-| `snr_db` | +0.931 | 0.834 | +0.751 | OK |
-| `speech_rate` | +0.908 | 0.780 | +0.670 | OK |
-
-But agreement between two estimators is weak evidence — they can share an
-assumption and be wrong together. So `src/data/validate_metadata.py`
-manufactures ground truth: take the cleanest 25% of utterances, inject white
-and babble noise at known SNR (0–20 dB), and measure recovery.
-
-| Estimator | Noise | Bias | MAE | Spearman w/ truth |
-|---|---|---|---|---|
-| WADA | white | +0.8 dB | 1.6 dB | +0.972 |
-| WADA | babble | +5.4 dB | 5.5 dB | +0.931 |
-| percentile | white | +7.0 dB | 7.0 dB | +0.980 |
-| percentile | babble | **+12.1 dB** | 12.1 dB | +0.921 |
-
-**This changes what the metadata may be used for.** The absolute values are
-badly biased — the percentile estimator overstates SNR by 7–12 dB, which is
-why AMI's median reads as a nonsensical 35.6 dB. But rank correlation with
-truth is 0.92–0.98 across the board. So **tercile bins are trustworthy and
-absolute dB figures are not**, and nothing in this report quotes an SNR in dB
-as if it were calibrated.
-
-This check also caught a real bug. My first WADA implementation inverted the
-model analytically and saturated at the grid maximum for all 1200 utterances,
-which produced a confident "SNR is unreliable, do not slice on it" verdict
-that was entirely an artifact of my own code. Two-estimator agreement alone
-would have surfaced it as a property of the data. Ground truth surfaced it as
-a bug.
-
-### Breakdowns
-
-Every slice below is computed pooled **and within each dataset**, because
-these fields are not independent of the corpus. The shortest duration tercile
-is 70% AMI and 0% SPGISpeech; both nonzero `numeric_rate` bins are 100%
-SPGISpeech. A pooled slice on those is a dataset slice wearing a different
-label, and binning inside each corpus is the only way to tell.
-
-WER by speech rate (tercile), leaderboard normalizer:
-
-| System | slow | mid | fast |
-|---|---|---|---|
-| whisper-large-v3 | 6.87 | 5.12 | **10.37** |
-| Qwen3-ASR-1.7B | 5.53 | 4.24 | 8.25 |
-| parakeet-tdt-0.6b-v2 | 5.48 | 4.24 | 8.19 |
-| deepgram-nova-3 (raw) | 5.33 | 4.50 | 8.06 |
-
-The pattern is U-shaped, and the fast tercile is where systems separate: the
-spread across systems roughly doubles from mid (0.88) to fast (2.31). Whisper
-degrades hardest. Slow speech is also worse than mid — these are the sparse,
-hesitant, disfluent utterances rather than carefully articulated ones.
-
-WER by SNR tercile (ordering trustworthy, values not) runs 8.42 → 7.28 → 6.97
-for Whisper and similarly for the rest: monotone, as expected, and a smaller
-effect than speech rate.
-
-By dataset, the systems do **not** agree on which corpus is hard:
-
-| System | AMI | GigaSpeech | SPGI |
-|---|---|---|---|
-| whisper-large-v3 | 14.64 | 9.49 | 2.84 |
-| Qwen3-ASR-1.7B | 9.27 | 8.03 | 3.05 |
-| parakeet-tdt-0.6b-v2 | **8.34** | **9.20** | 2.37 |
-| deepgram-nova-3 (raw) | 9.99 | 8.06 | 2.66 |
-
-Parakeet is best on AMI and worst-but-one on GigaSpeech. A macro-average over
-datasets, which is what the board reports, erases this completely — and which
-corpus resembles your traffic is the only question a buyer actually has.
-
-### How big is each effect
-
-Before the individual slices, how much each clip property actually moves WER —
-so that "X matters" is a measured claim rather than an impression.
-
-**How to read this.** Sort the 1,200 clips into three groups by one property
-(short / medium / long, say). Score each group separately. The number below is
-the WER difference between the best group and the worst, averaged over the
-four single-system configurations. Nova-3 scores 4.6 on medium-length clips
-and 12.6 on short ones, so clip length is worth about 8 WER points on Nova-3,
-and 7.6 averaged over systems. Everything is in WER points, the same unit as
-every other number in this report.
-
-| Property of a clip | worth (WER points) |
-|---|---|
-| how long it is | **7.6** |
-| how many "um"s it has | 7.5 |
-| how many words it has | 6.9 |
-| whether it contains numbers | 4.6 |
-| how fast the person talks | 4.2 |
-| how noisy it is | 1.7 |
-| how much of it is speech vs silence | 1.2 |
-| | |
-| *for comparison: all five system configurations* | *1.5* |
-| *for comparison: choice of normalizer* | *1.9* |
-
-**Five of the seven clip properties move WER more than the entire difference
-between the best and worst system here.** That is the finding. A leaderboard
-reports the 1.5 and says nothing about the 7.6, so its headline number is
-mostly a statement about the audio it chose rather than about the recognizers
-it ranks. Within AMI alone, clip length is worth 12 points — eight times the
-model spread.
-
-The dataset label is deliberately **not** in that table. It would top it at
-8.1 points, but it is not a property of a clip: it is the name of the whole
-bundle of properties, so it cannot compete with its own contents. The rows
-above are an attempt to explain the dataset effect, not rivals to it, and the
-next subsection argues that clip length is most of it.
-
-Two cautions. "How many 'um's" and "whether it contains numbers" are almost
-entirely confounded with dataset (shown further down), so their numbers are
-largely the dataset effect reappearing under another name. And "how many
-words" is the WER *denominator* — part of its 6.9 is arithmetic rather than
-difficulty — which is why the duration analysis leads below and the word-count
-one only corroborates it.
-
-### Duration, and what "AMI is hard" actually means
-
-WER by duration tercile, pooled:
-
-| System | 2.2s | 6.1s | 10.5s |
-|---|---|---|---|
-| whisper-large-v3 | **15.23** | 6.82 | 6.00 |
-| deepgram-nova-3 (raw) | 12.58 | 4.64 | 5.22 |
-| parakeet-tdt-0.6b-v2 | 11.51 | 4.87 | 5.33 |
-| Qwen3-ASR-1.7B | 11.38 | 4.62 | 5.57 |
-
-Short clips score about 2.5 times worse than medium ones: 7.6 WER points of
-difference, against the 1.5 points that separate all five system
-configurations, and more than clip noise and speaking rate put together. Note
-it is not a straight line — the *middle* group scores best, not the longest.
-
-It survives binning within AMI, where it is a factor of three (Parakeet
-18.32 → 9.08 → 5.93 at medians 1.4s / 3.0s / 5.7s). But the corpora barely
-overlap in duration — AMI's *longest* tercile has a shorter median than
-SPGISpeech's *shortest* — so the right test is fixed absolute buckets:
-
-| Parakeet, WER | 0–2s | 2–4s | 4–8s | 8–16s |
-|---|---|---|---|---|
-| AMI | 18.24 | 9.78 | 5.74 | 5.27 |
-| GigaSpeech | 16.57 | 11.16 | 7.54 | 9.63 |
-| SPGISpeech | — | — | 1.93 | 2.52 |
-
-**At matched duration, AMI is not harder than GigaSpeech.** Pooled, Whisper
-scores 14.64 on AMI and 9.49 on GigaSpeech, and AMI's reputation as the hard
-corpus rests on numbers like that. But 130 of AMI's 400 utterances are under
-two seconds against 36 of GigaSpeech's, and at 2–8s AMI is the *easier* of the
-two. Far-field overlapping speech is real, and so is the fact that a large
-part of what the benchmark attributes to it is utterance length.
-
-SPGISpeech stays genuinely easier at matched duration (1.93 vs 5.74 at 4–8s),
-so this is not a claim that duration explains everything — it explains the
-AMI–GigaSpeech gap and none of the SPGISpeech one.
-
-### Half of the short-utterance penalty is geometry, not difficulty
-
-This is where section 3's edge metric and section 4's metadata turn out to be
-the same finding. The edge metric counts errors in the first and last two
-reference words. For a 6-word utterance that is 4 of 6 word slots; for a
-40-word one it is 4 of 40. A short utterance is *mostly edge*, and edges run
-roughly twice the error rate of middles at every length:
-
-| Parakeet | n | edge share | WER | edge error | middle error |
-|---|---|---|---|---|---|
-| 6–9 words | 134 | 52.9% | 13.81 | 18.28 | 8.79 |
-| 10–15 | 216 | 31.3% | 6.06 | 6.83 | 5.71 |
-| 16–25 | 386 | 19.9% | 5.11 | 6.93 | 4.65 |
-| 26+ | 315 | 11.5% | 5.51 | 8.49 | 5.12 |
-
-Both causes are present and they can be separated. Give the shortest bucket
-the *edge share* of the longest one while keeping its own edge and middle
-error rates, and its WER would be 9.88 instead of 13.81. So of the 8.30-point
-short-vs-long gap, 3.93 points are composition and the remaining 4.37 are
-short utterances being genuinely harder word-for-word. Consistent across all
-five configurations:
-
-| System | gap | from composition | share |
-|---|---|---|---|
-| Qwen3-ASR-1.7B | 6.98 | 4.15 | 59% |
-| whisper-large-v3 | 10.61 | 5.83 | 55% |
-| deepgram-nova-3 (formatted) | 9.56 | 5.24 | 55% |
-| deepgram-nova-3 (raw) | 9.78 | 5.09 | 52% |
-| parakeet-tdt-0.6b-v2 | 8.30 | 3.93 | 47% |
-
-**Roughly half of why short utterances score badly is that a short utterance
-is mostly first-and-last words, and first-and-last words are where
-pre-segmented audio is cut.** That is a property of the benchmark's
-segmentation, not of the recognizers — the same conclusion the padding probe
-reached from the other direction, and this is why both belong in the report.
-It also means a benchmark's duration distribution silently sets how much of
-its score is an endpointing measurement.
-
-### Two fields that did not pay off, reported anyway
-
-**`numeric_rate` is uninformative here.** Pooled, WER looks *better* on
-utterances containing digits (6.30 → 2.95 for Parakeet), which would be a
-strange finding. The reason is that both nonzero bins are **100%
-SPGISpeech** — the easiest corpus, because that is where earnings-call figures
-live. There is no within-dataset comparison to make, so the field says nothing
-about numbers and everything about which corpus talks about money. It is in
-the table with that caveat rather than deleted, because the pooled version is
-exactly the kind of number that reads well in a slide.
-
-**`disfluency_rate`'s pooled effect is mostly the same confound.** Pooled it
-is cleanly monotone (Parakeet 5.55 → 9.04 → 10.40, Whisper 6.65 → 11.48 →
-19.43) and its high bin is 86% AMI and 0% SPGISpeech. Within AMI the effect
-largely dissolves and turns non-monotone — Parakeet 8.81 / 6.36 / 10.24 for
-none / low / high — with one exception: **Whisper still degrades sharply**,
-14.30 → 13.90 → 19.88. So "disfluent speech is harder" is mostly "AMI is
-AMI", except for Whisper, where it is a real and specific weakness.
-
-Both fields are zero-inflated — 86% and 96% exactly zero — so terciles put
-everything in one bin and reported nothing at all until the binning was
-changed to none-vs-some. A field can be exact, correctly computed, and still
-silently invisible because of how it was bucketed.
-
-`voiced_fraction` is monotone and modest (Nova-3 6.89 → 6.06 → 5.48) and is
-reported with `field_reliable=False`, because it has one estimator and this
-project's rule is that an unchecked estimate gets flagged rather than used
-quietly.
-
----
+**Not all of these fields are equally trustworthy, and the ones carrying the
+findings are the solid ones.** Duration and word count are counted directly
+from the audio and the transcript. Noise and speech rate are estimates, so I
+checked them: two independent estimators agree on the ordering of clips
+(0.91–0.93), but against manufactured ground truth both overstate SNR by up to
+12.1 dB, which is why AMI's median reads as a nonsensical 35.6 dB. They rank
+clips correctly (0.92–0.98) and nothing more, so noise enters only as an
+ordering and never as a dB figure. Voiced fraction has no second estimator at
+all and is the weakest column in the table.
 
 ## Limitations
 
-- **Three of nine datasets.** No URGENT24 (noisy), no Voice Arena (accented),
-  no Earnings22-chunked, and the two private sets are unavailable. Our
-  conclusions about ranking sensitivity hold on the three we ran; the full
-  board mixes in conditions we did not test, and URGENT24 in particular would
-  likely stress the SNR breakdown much harder.
-- **400 utterances per dataset** resolves ~±0.35 WER. Insufficient for the
-  top three. Stated throughout rather than worked around.
-- **Single run per system.** Greedy decoding is deterministic, so this costs
-  nothing for the open models, but the Deepgram API could change under us
-  without notice. No version pinning is available there.
-- **Decoding config is ours, not theirs.** We did not replicate each model's
-  per-script batching and precision. This is the most likely cause of the
-  one-directional +0.58 reproduction gap and the first thing I would chase
-  with more time.
-- **Catastrophic failure rate is underpowered here.** At ~2.5% over 1,200
-  utterances it rests on ~30 events per system and separates 1 of 10 pairs. It
-  is reported as directional. More utterances would fix this, and it is where
-  I would spend them first.
-- **The hallucination metric uses length as a proxy.** A hypothesis 1.2x the
-  reference length is usually invention, but a system that substitutes two
-  words for one trips it without inventing anything, and one that replaces a
-  sentence with an equally long fabrication does not trip it at all. It is a
-  screen, not a verdict. It is also sensitive on short utterances, where a
-  3-word hypothesis against a 2-word reference is 50% over.
-- **Two metadata fields are confounded past the point of usefulness.**
-  `numeric_rate`'s nonzero bins are 100% SPGISpeech and `disfluency_rate`'s
-  high bin is 86% AMI, so neither supports a pooled claim. Both are reported
-  with the confound stated rather than dropped, but a design that sampled for
-  balance on these fields instead of for duration coverage would have been
-  able to say something about them.
-- **The duration finding is a within-subset observation, not a controlled
-  experiment.** Matched-duration buckets equalise length but not speaker,
-  channel or content, so "AMI is no harder than GigaSpeech at matched
-  duration" is a statement about these 1,200 utterances. Testing it properly
-  means re-segmenting one corpus at the other's length distribution, which is
-  the experiment I would run next.
-- **An earlier keyword error rate was dropped rather than reported.** Its
-  vocabulary was defined in-set over 1,200 references, which is a noisy rarity
-  estimate, and every confidence interval overlapped every other, so it could
-  not support the reordering it appeared to show.
-- **Injected noise is friendlier than real noise.** Additive white and babble
-  is not reverberation or overlapping speech, which is what actually makes AMI
-  hard. The recovery figures are an upper bound on estimator quality.
-- **`spell_out_numbers` is still imperfect.** `$5.50` becomes "five point
-  five dollars" rather than "five fifty". It is applied identically to
-  reference and hypothesis so it does not bias the comparison, but it is not
-  how anyone speaks.
-- **Our normalizer's currency path is effectively untested.** These three
-  reference sets contain **zero** currency symbols and **one** comma-grouped
-  number across 1,200 utterances, so `normalize_currency` ablates to 0.01 and
-  the thousands-separator handling fires once. Three real bugs lived in that
-  code until I spot-checked it on handwritten sentences (see *Where I used
-  AI*); on financial or medical audio, where number handling matters most,
-  this is the part of the normalizer I would least trust without first
-  writing it a proper test set.
-- **No multi-seed subset.** One sample at seed 42. Re-drawing the subset would
-  give a cleaner estimate of sampling variance than the bootstrap alone.
+- Three of nine datasets, with no noisy or accented set.
+- Sizing, as above: built for pooled comparisons, so anything Deepgram or
+  metadata-based is stuck at ~400 clips per dataset. I first read Parakeet as
+  beating Qwen3 on AMI by 0.93 — below that resolution, and the full split
+  reversed the sign.
+- Decoding configuration is my explanation for the +0.45 gap by elimination,
+  not by demonstration. Replicating one official script would settle it.
+- The long-output metric uses length as a proxy, so it also misses an equally
+  long fabrication and false-positives on a two-for-one substitution.
+- The filler, length and noise results aren't controlled experiments. What
+  generalises from the filler finding is the mechanism, not the 2.7 points.
 
 ## How I'd automate this
 
-The pipeline is already structured for it — raw hypotheses are cached
-separately from scoring, so normalization and metric changes are seconds, not
-GPU-hours. To run it continuously:
-
-1. **Pin everything, fail loudly on drift.** Dataset revision, model revision,
-   normalizer commit and leaderboard version are all config today. A nightly
-   job should diff them and fail rather than silently rescore against a moved
-   reference. `dirtygit` already ties every result to a commit.
-2. **Make the subset a fixed, versioned artifact.** Publish the sampled
-   utterance IDs as a dataset so the sample stops being a function of a seed
-   and a sort order that upstream may change.
-3. **Treat normalization as a tracked dimension, not a constant.** Every
-   result should carry its normalizer hash. The scoring grid is already
-   system × dataset × normalizer; a regression dashboard should show all
-   three, because a normalizer change can decide whether a model change is
-   reportable — here it is the difference between p<0.001 and p=0.36 on the
-   same 1,200 utterances.
-4. **Gate on CIs, not point estimates.** A nightly "model A beat model B"
-   alert should fire on the paired bootstrap, not on the means. Most of the
-   movement on a leaderboard this tight is noise.
-5. **Scale the sample until the comparison you care about is resolvable.**
-   Measure the gap you need to detect, then size the sample to it. 400/dataset
-   detects 0.35 WER; detecting 0.05 is a different exercise, and knowing which
-   one you need is the first question.
-6. **Separate pipeline health from model quality.** Empty-hypothesis counts,
-   API error rates and metadata reliability should alarm independently. Three
-   of my five systems returned a handful of empty transcripts; that must never
-   be silently absorbed into a WER.
+The pipeline already separates transcription from scoring, so re-scoring under
+a new normalizer or metric takes seconds rather than GPU-hours. For continuous
+use I'd pin dataset, model, normalizer and leaderboard versions in config and
+fail a nightly job on drift rather than silently rescoring against a moved
+target; publish the sampled clip IDs as a fixed artifact so the sample doesn't
+depend on a seed and an upstream sort order; run a cheap sample nightly with
+the full splits on release candidates and reconcile the two
+(`src/eval/subset_validation.py` checks that the full number lands inside the
+sample's error bar and attributes any difference to batching, sampling or
+config); carry the normalizer version on every result, since a normalization
+change can decide which model wins; alarm on paired comparisons rather than
+point estimates, because most movement on a board this tight is noise; never
+report a rule's effect averaged across datasets, which understated the filler
+rule's AMI effect several times over when I first computed it; and keep pipeline
+health (empty outputs, API errors, metadata checks) alarming separately from
+model quality.
 
 ## Where I used AI, and where I didn't
 
-Claude (via Claude Code) was used heavily throughout. The split below is
-specific rather than a blanket disclaimer, because which parts were generated
-turned out to matter for how the work had to be checked.
+Claude (via Claude Code) wrote most of the code: the four system backends, the
+data plumbing, the docstrings, and first drafts of this report. It also looked
+up which of the leaderboard's datasets are gated.
 
-**AI did most of the typing**: boilerplate across the four system backends,
-the parquet/shard plumbing, dataframe wrangling, docstrings, and the first
-drafts of this report. It also did the API spelunking that established the
-leaderboard's current shape — that the results repos are gated, that the
-public Gradio endpoint serves the same table, and that Deepgram has never
-appeared in any version.
+I chose the leaderboard and the three datasets, designed the sample once I
+found the length sort, picked which normalization rules to disagree on, and
+decided what the results do and don't support.
 
-**I made the judgment calls**: choosing this leaderboard and these three
-datasets; the systematic-sampling design once the length-sort was discovered;
-which seven normalization rules to disagree on and why; using a *paired*
-bootstrap rather than comparing independent CIs; the decision to validate
-metadata against injected ground truth rather than settle for two estimators
-agreeing; and every claim in this report about what is and isn't statistically
-supported.
+Checking the generated code took a specific approach, because reading it did
+not work. Three number-handling bugs in my normalizer passed a careful read,
+and so did a rule that closed up hyphens, which turned `forty-two-year-old`
+into `fortytwoyearold` and added about 1.8 points to every WER I reported. I
+found them by making the code print its output on deliberately awkward inputs
+and reading that instead.
 
-**Four times, the useful finding came from distrusting the AI-written code
-rather than reading it.** The WADA-SNR implementation looked plausible and was
-wrong — it saturated at the grid maximum for every utterance and produced a
-confident, entirely spurious "metadata is unreliable" finding. The keyword
-metric's original capitalization-based vocabulary also looked plausible and
-silently excluded a third of the data, because GigaSpeech references are
-lowercase -- that metric was later dropped for unrelated reasons, but the
-bug is why I stopped trusting plausible-looking code here. The custom
-normalizer held three number-handling bugs, including
-one where the same quantity tokenized differently depending on whether the
-source wrote `twenty-five` or `25` — which defeats the entire purpose of
-canonicalizing numbers, and which moved the top rank under our own normalizer
-once fixed. Writing out the normalizer-diff table for this report found two
-more of the same kind: a stranded ordinal suffix turning `22nd` into "twenty
-twond" on 60 hypotheses and none of the references, and a percent sign
-stripped asymmetrically so that agreeing with the reference scored an
-insertion. And `collapse_hyphenation` welded `forty-two-year-old` into a
-single token, inflating every custom-normalizer WER by about 1.8 points and
-manufacturing two rank flips that this report would otherwise have presented
-as its headline finding.
-
-That last one is the sharpest version of the problem. It was not an obscure
-helper: it was the *largest number in the ablation table*, which is to say it
-looked like the most important result in the section rather than the biggest
-error in it. A bug that makes a finding look stronger is the one least likely
-to be investigated.
-
-Each was found the same way: by making the code emit output a human could
-eyeball, on inputs chosen to be awkward, and reading it. None was found by
-code review — all four passed a careful read. That is the main thing I'd
-carry into doing this work at scale. Generated analysis code fails in ways
-that produce *publishable-looking numbers*, and the numbers are the artifact
-nobody checks, because checking them is the work the numbers were supposed to
-replace.
+The costliest mistake was not a bug. My rule-by-rule table was correct, but it
+averaged across datasets, so AMI's filler effect got diluted by SPGISpeech,
+which contains two filler words in 948,632. The table reported 0.65 where the
+real effect was 2.4 to 3.1, large enough to change which model wins. No test
+would catch that, because nothing was broken. I noticed because I expected
+Whisper to gain from dropping fillers and the number said otherwise.

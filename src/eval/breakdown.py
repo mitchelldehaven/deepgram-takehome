@@ -21,7 +21,7 @@ from scipy.stats import spearmanr
 from src.config import load_config, setup_logging
 from src.data.utils import load_jsonl
 from src.eval.metrics import METRICS, bootstrap_ci, counts, edge_breakdown
-from src.eval.score import aligned, metric_kwargs, load_transcripts
+from src.eval.score import aligned, metric_kwargs, load_transcripts, retained
 from src.normalization.factory import build_normalizer
 from src.paths import CONFIG_DIR, METADATA_FILE, SCORES_DIR, SUBSET_FILE
 
@@ -175,7 +175,7 @@ def breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability)
     rows = []
     for system_name, hypotheses in transcripts.items():
         references, hyps, datasets = aligned(subset, hypotheses, normalizer)
-        kept = [row for row in subset if row["id"] in hypotheses]
+        kept = retained(subset, hypotheses, normalizer)
 
         for metric, function in METRICS.items():
             pairs = function(references, hyps, **metric_kwargs(cfg, metric))
@@ -254,6 +254,112 @@ def breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability)
                 )
     return pd.DataFrame(rows)
 
+
+# Fixed absolute-duration buckets, in seconds. Terciles cannot answer "is AMI
+# harder than GigaSpeech at the same clip length", because the corpora barely
+# overlap in duration -- AMI's longest tercile has a shorter median than
+# SPGISpeech's shortest -- so each corpus's terciles cover a different range.
+# Fixed edges put every corpus on one scale, at the cost of empty cells.
+DURATION_BUCKETS = [(0, 2), (2, 4), (4, 8), (8, 16)]
+
+
+def duration_buckets(subset, metadata, transcripts, normalizer):
+    """WER per system x dataset x fixed duration bucket.
+
+    This is what supports the claim that most of "AMI is the hard corpus" is
+    utterance length rather than acoustics. Hand-building this table is how
+    the effect-size table went stale; computed here so the claim is
+    reproducible.
+    """
+    by_id = {row["id"]: row for row in metadata}
+    rows = []
+    for system_name, hypotheses in transcripts.items():
+        kept = retained(subset, hypotheses, normalizer)
+        references = [normalizer(row["reference"]) for row in kept]
+        hyps = [normalizer(hypotheses[row["id"]]) for row in kept]
+        pairs = METRICS["wer"](references, hyps)
+        durations = np.array([by_id[row["id"]]["duration_s"] for row in kept], float)
+        datasets = np.array([row["dataset"] for row in kept])
+        for dataset in dict.fromkeys(datasets):
+            for low, high in DURATION_BUCKETS:
+                mask = (datasets == dataset) & (durations >= low) & (durations < high)
+                if mask.sum() < MIN_BIN_SIZE:
+                    continue
+                denominator = pairs[mask][:, 1].sum()
+                rows.append(
+                    {
+                        "system": system_name,
+                        "dataset": dataset,
+                        "bucket": f"{low}-{high}s",
+                        "n": int(mask.sum()),
+                        "wer": 100 * pairs[mask][:, 0].sum() / denominator,
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def duration_matched(subset, metadata, transcripts, normalizer, reference="Gigaspeech-Cleaned"):
+    """Each dataset's WER reweighted to another's duration distribution.
+
+    The bucket table says whether one corpus is harder than another *at a
+    given length*; this says how much of the pooled difference that accounts
+    for. AMI's per-bucket WER is reweighted by the reference corpus's share
+    of reference words per bucket, which asks: what would AMI score if its
+    clips were as long as GigaSpeech's?
+
+    Worth computing rather than eyeballing the bucket table, because the
+    buckets disagree across systems, and reading one system's row invites an
+    over-generalisation: length is the whole AMI-GigaSpeech gap for four of
+    the five systems, and a third of it for Whisper.
+    """
+    by_id = {row["id"]: row for row in metadata}
+    rows = []
+    for system_name, hypotheses in transcripts.items():
+        kept = retained(subset, hypotheses, normalizer)
+        pairs = METRICS["wer"](
+            [normalizer(row["reference"]) for row in kept],
+            [normalizer(hypotheses[row["id"]]) for row in kept],
+        )
+        durations = np.array([by_id[row["id"]]["duration_s"] for row in kept], float)
+        datasets = np.array([row["dataset"] for row in kept])
+
+        def wer_of(mask):
+            denominator = pairs[mask][:, 1].sum()
+            return 100 * pairs[mask][:, 0].sum() / denominator if denominator else np.nan
+
+        in_bucket = lambda name, low, high: (
+            (datasets == name) & (durations >= low) & (durations < high)
+        )
+        reference_wer = wer_of(datasets == reference)
+        for dataset in dict.fromkeys(datasets):
+            if dataset == reference:
+                continue
+            numerator = denominator = 0.0
+            for low, high in DURATION_BUCKETS:
+                here, there = in_bucket(dataset, low, high), in_bucket(reference, low, high)
+                if here.sum() < MIN_BIN_SIZE or there.sum() < MIN_BIN_SIZE:
+                    continue
+                weight = pairs[there][:, 1].sum()
+                numerator += wer_of(here) * weight
+                denominator += weight
+            if not denominator:
+                continue
+            matched = numerator / denominator
+            observed = wer_of(datasets == dataset)
+            rows.append(
+                {
+                    "system": system_name,
+                    "dataset": dataset,
+                    "reference_dataset": reference,
+                    "wer": observed,
+                    "reference_wer": reference_wer,
+                    "gap": observed - reference_wer,
+                    "wer_at_reference_durations": matched,
+                    "gap_at_reference_durations": matched - reference_wer,
+                    "points_from_duration": observed - matched,
+                }
+            )
+    return pd.DataFrame(rows)
 
 # Reference-length buckets for the decomposition below. Lower bound is
 # MIN_REF_WORDS, since shorter utterances have no edge/middle split.
@@ -337,6 +443,58 @@ def length_decomposition(subset, transcripts, normalizer):
     return table, pd.DataFrame(counterfactual)
 
 
+def effect_sizes(table, metrics_path):
+    """How many WER points each clip property is worth, next to the model and
+    normalizer effects, so "X matters" is a measured claim rather than an
+    impression.
+
+    The effect of a property is the gap between its worst and best bin,
+    averaged over systems. That is deliberately the same unit as every other
+    number in the report -- WER points -- rather than a ratio or a variance
+    share, both of which are harder to interpret and neither of which answers
+    "how much worse does this make my transcripts".
+
+    The dataset label is excluded on purpose. It would top the table, but it
+    is not a property of a clip: it is the name of the whole bundle of
+    properties, so it cannot compete with its own contents.
+
+    Hand-deriving this meant it silently went stale when scoring changed.
+    Computed here so it cannot.
+    """
+    pooled = table[(table.dataset == "ALL") & (table.metric == "wer")]
+    rows = [
+        {"effect": field, "kind": "clip property", "wer_points": value}
+        for field, value in (
+            pooled.groupby(["field", "system"])
+            .value.agg(lambda v: v.max() - v.min())
+            .groupby("field")
+            .mean()
+            .sort_values(ascending=False)
+            .items()
+        )
+    ]
+    metrics = pd.read_csv(metrics_path)
+    wer_rows = metrics[(metrics.metric == "wer") & (metrics.dataset == "ALL")]
+    for norm_name, group in wer_rows.groupby("normalizer"):
+        rows.append(
+            {
+                "effect": f"all system configurations ({norm_name} normalizer)",
+                "kind": "for comparison",
+                "wer_points": group.value.max() - group.value.min(),
+            }
+        )
+    wide = wer_rows.pivot_table(index="system", columns="normalizer", values="value")
+    if {"custom", "leaderboard"} <= set(wide.columns):
+        rows.append(
+            {
+                "effect": "choice of normalizer",
+                "kind": "for comparison",
+                "wer_points": (wide["custom"] - wide["leaderboard"]).abs().mean(),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def main(cfg):
     logger.info(f"githash={cfg.githash}")
     subset = load_jsonl(SUBSET_FILE)
@@ -357,6 +515,25 @@ def main(cfg):
 
     table = breakdown_table(cfg, subset, metadata, transcripts, normalizer, reliability)
     table.to_csv(SCORES_DIR / "breakdown.csv", index=False)
+
+    buckets = duration_buckets(subset, metadata, transcripts, normalizer)
+    buckets.to_csv(SCORES_DIR / "duration_buckets.csv", index=False)
+    matched = duration_matched(subset, metadata, transcripts, normalizer)
+    matched.to_csv(SCORES_DIR / "duration_matched.csv", index=False)
+    logger.info("each corpus reweighted to GigaSpeech's duration distribution:")
+    for _, row in matched.iterrows():
+        logger.info(
+            f"  {row.system:<26} {row.dataset:<20} {row.wer:5.2f} -> "
+            f"{row.wer_at_reference_durations:5.2f}  "
+            f"(gap {row.gap:+.2f} -> {row.gap_at_reference_durations:+.2f}; "
+            f"{row.points_from_duration:+.2f} points were length)"
+        )
+
+    effects = effect_sizes(table, SCORES_DIR / "metrics.csv")
+    effects.to_csv(SCORES_DIR / "effect_sizes.csv", index=False)
+    logger.info("effect sizes (worst bin - best bin, mean over systems), WER points:")
+    for _, row in effects.iterrows():
+        logger.info(f"  {row.effect:<48} {row.wer_points:5.2f}  ({row.kind})")
     for metric in METRICS:
         for field in table.field.unique():
             subtable = table[(table.field == field) & (table.metric == metric)]

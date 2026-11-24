@@ -76,9 +76,23 @@ def load_run(processed_dir, outputs_dir, systems):
 
 
 def pairs_for(ids, rows, hypotheses, normalizer):
-    """Per-utterance (errors, reference words) for a given set of ids."""
-    references = [normalizer(rows[i]["reference"]) for i in ids]
-    hyps = [normalizer(hypotheses[i]) for i in ids]
+    """Per-utterance (errors, reference words) for a given set of ids.
+
+    Drops utterances whose reference normalizes to empty, exactly as
+    `score.aligned` does. This function duplicated that logic and originally
+    duplicated the omission too, which is worth noting: the empty-reference
+    bug was found precisely *because* two implementations of the same
+    quantity disagreed, and then it had to be fixed twice. The lesson is that
+    a second implementation is a good cross-check and a bad place to keep
+    shared logic.
+    """
+    references, hyps = [], []
+    for i in ids:
+        reference = normalizer(rows[i]["reference"])
+        if not reference.strip():
+            continue
+        references.append(reference)
+        hyps.append(normalizer(hypotheses[i]))
     return counts(references, hyps)
 
 
@@ -222,15 +236,29 @@ def main(cfg):
             f"max |.| {values.abs().max():.2f}"
         )
 
+    # Per cell, not a ratio of mean widths. The three splits grow by very
+    # different factors (AMI ~20x, GigaSpeech ~47x, SPGISpeech ~98x), and the
+    # widest intervals are the ones that grow least, so dividing the mean
+    # widths understates the tightening badly -- 5.2x against a true ~6.8x,
+    # which is easy to misread as evidence that errors cluster. They do not:
+    # per cell the scaling is 0.96 of sqrt(n).
     width_subset = (per_dataset.a_ci_high - per_dataset.a_ci_low).mean()
     width_full = (per_dataset.c_ci_high - per_dataset.c_ci_low).mean()
+    per_cell = (
+        (per_dataset.a_ci_high - per_dataset.a_ci_low)
+        / (per_dataset.c_ci_high - per_dataset.c_ci_low)
+    )
+    predicted = (per_dataset.n_full / per_dataset.n_subset) ** 0.5
     logger.info("")
-    data_ratio = per_dataset.n_full.mean() / per_dataset.n_subset.mean()
     logger.info(
         f"  mean 95% CI width: {width_subset:.2f} WER on 400 rows, "
-        f"{width_full:.2f} on the full split -- "
-        f"{width_subset / width_full:.1f}x tighter for ~{data_ratio:.0f}x the data "
-        f"(sqrt(n) would predict {data_ratio ** 0.5:.1f}x)"
+        f"{width_full:.2f} on the full split"
+    )
+    logger.info(
+        f"  per cell, intervals tighten {per_cell.mean():.2f}x against "
+        f"sqrt(n)'s {predicted.mean():.2f}x = {(per_cell / predicted).mean():.2f} "
+        f"of sqrt(n); naively dividing the mean widths would say "
+        f"{width_subset / width_full:.1f}x"
     )
     logger.info(f"table -> {out_dir / 'subset_validation.csv'}")
 
